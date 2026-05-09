@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "skillbox": {
+      "command": "sh",
+      "args": [
+        "-lc",
+        "SKILLBOX_MONOSERVER_ROOT=\"$HOME/repos\" SKILLBOX_MONOSERVER_HOST_ROOT=\"$HOME/repos\" SKILLBOX_CLIENTS_HOST_ROOT=\"$HOME/repos/skillbox-config/clients\" exec python3 \"$HOME/repos/opensource/skillbox/.env-manager/mcp_server.py\""
+      ]
+    }
+  }
+}
