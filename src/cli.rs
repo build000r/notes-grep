@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +8,8 @@ use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 
 use crate::notes::{
-    IndexedNote, NgError, NoteHit, StoreStats, default_db_path, open_store, search_indexed_notes,
+    FolderEntry, FolderMovePlan, IndexedNote, NgError, NoteHit, NoteMovePlan, StoreStats,
+    default_db_path, open_store, open_store_for_writing, search_indexed_notes,
 };
 
 #[derive(Debug, Parser)]
@@ -16,7 +17,7 @@ use crate::notes::{
     name = "ng",
     version,
     about = "Fast local Apple Notes search",
-    long_about = "Fast local Apple Notes search. v0.1 indexes Apple Notes body blobs into a local JSONL cache and searches that warmed cache when available."
+    long_about = "Fast local Apple Notes search. Indexes Apple Notes body blobs into a local JSONL cache, searches warmed caches, and provides guarded nested folder moves."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,8 +43,36 @@ enum CommandKind {
     Index,
     /// Search the warmed full-body cache, falling back to title/snippet SQLite search.
     Search(SearchArgs),
+    /// List, rename, or move nested Notes folders.
+    #[command(alias = "folders")]
+    Folder {
+        #[command(subcommand)]
+        command: FolderCommand,
+    },
+    /// Move one active note to an existing folder.
+    #[command(alias = "notes")]
+    Note {
+        #[command(subcommand)]
+        command: NoteCommand,
+    },
     /// Open a note in Notes.app by AppleScript/coredata ID.
     Open(OpenArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum FolderCommand {
+    /// List folder paths.
+    List,
+    /// Rename or move a folder to a new nested path.
+    #[command(name = "mv", alias = "move", alias = "rename")]
+    Move(FolderMoveArgs),
+}
+
+#[derive(Debug, Subcommand)]
+enum NoteCommand {
+    /// Move one active note to an existing same-account folder.
+    #[command(name = "mv", alias = "move")]
+    Move(NoteMoveArgs),
 }
 
 #[derive(Debug, Args)]
@@ -60,6 +89,30 @@ struct SearchArgs {
 #[derive(Debug, Args)]
 struct OpenArgs {
     note_id: String,
+}
+
+#[derive(Debug, Args)]
+struct FolderMoveArgs {
+    /// Existing folder path. Account-prefixed paths disambiguate duplicates.
+    source: String,
+    /// New final folder path. A one-segment target renames in place.
+    target: String,
+
+    /// Write the change. Without this flag the command prints a dry-run plan.
+    #[arg(long)]
+    apply: bool,
+}
+
+#[derive(Debug, Args)]
+struct NoteMoveArgs {
+    /// Stable x-coredata://.../ICNote/p... note ID, or an unambiguous numeric database ID.
+    note_id: String,
+    /// Existing destination folder path. Account-prefixed paths disambiguate duplicates.
+    folder: String,
+
+    /// Write the change. Without this flag the command prints a dry-run plan.
+    #[arg(long)]
+    apply: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +141,29 @@ struct IndexView {
     body_notes: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct FolderMoveView {
+    status: &'static str,
+    applied: bool,
+    changed: bool,
+    source: String,
+    target: String,
+    descendant_folders: usize,
+    notes: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct NoteMoveView {
+    status: &'static str,
+    applied: bool,
+    changed: bool,
+    note_id: String,
+    note_db_id: i64,
+    note_title: String,
+    source_folder_path: String,
+    target_folder_path: String,
+}
+
 pub fn run() -> Result<(), NgError> {
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db_path);
@@ -99,11 +175,13 @@ pub fn run() -> Result<(), NgError> {
         Some(CommandKind::Stats) => stats(&db_path, cli.json),
         Some(CommandKind::Index) => index(&db_path, cache_override, cli.json),
         Some(CommandKind::Search(args)) => search(&db_path, cache_override, args, cli.json),
+        Some(CommandKind::Folder { command }) => folder_command(&db_path, command, cli.json),
+        Some(CommandKind::Note { command }) => note_command(&db_path, command, cli.json),
         Some(CommandKind::Open(args)) => open_note(args),
     }
 }
 
-fn print_home(db_path: &PathBuf, json: bool) -> Result<(), NgError> {
+fn print_home(db_path: &Path, json: bool) -> Result<(), NgError> {
     let status = match open_store(db_path).and_then(|store| store.stats()) {
         Ok(_) => "ready",
         Err(NgError::DatabaseMissing(_)) => "missing-notes-db",
@@ -115,7 +193,14 @@ fn print_home(db_path: &PathBuf, json: bool) -> Result<(), NgError> {
         tool: "ng",
         status,
         db: db_path.display().to_string(),
-        commands: vec!["ng doctor", "ng stats", "ng search \"query\"", "ng index"],
+        commands: vec![
+            "ng doctor",
+            "ng stats",
+            "ng search \"query\"",
+            "ng index",
+            "ng folder list",
+            "ng note mv NOTE_ID FOLDER",
+        ],
     };
 
     if json {
@@ -128,7 +213,7 @@ fn print_home(db_path: &PathBuf, json: bool) -> Result<(), NgError> {
     Ok(())
 }
 
-fn doctor(db_path: &PathBuf, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
+fn doctor(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
     let store = open_store(db_path)?;
     let stats = store.stats()?;
     let view = DoctorView {
@@ -150,7 +235,7 @@ fn doctor(db_path: &PathBuf, cache_override: Option<PathBuf>, json: bool) -> Res
     Ok(())
 }
 
-fn stats(db_path: &PathBuf, json: bool) -> Result<(), NgError> {
+fn stats(db_path: &Path, json: bool) -> Result<(), NgError> {
     let store = open_store(db_path)?;
     let stats = store.stats()?;
     if json {
@@ -161,7 +246,7 @@ fn stats(db_path: &PathBuf, json: bool) -> Result<(), NgError> {
     Ok(())
 }
 
-fn index(db_path: &PathBuf, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
+fn index(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
     let store = open_store(db_path)?;
     let notes = store.all_indexed_notes()?;
     let body_notes = notes
@@ -211,7 +296,7 @@ fn index(db_path: &PathBuf, cache_override: Option<PathBuf>, json: bool) -> Resu
 }
 
 fn search(
-    db_path: &PathBuf,
+    db_path: &Path,
     cache_override: Option<PathBuf>,
     args: SearchArgs,
     json: bool,
@@ -249,16 +334,143 @@ fn open_note(args: OpenArgs) -> Result<(), NgError> {
     }
 }
 
+fn folder_command(db_path: &Path, command: FolderCommand, json: bool) -> Result<(), NgError> {
+    match command {
+        FolderCommand::List => folder_list(db_path, json),
+        FolderCommand::Move(args) => folder_move(db_path, args, json),
+    }
+}
+
+fn folder_list(db_path: &Path, json: bool) -> Result<(), NgError> {
+    let store = open_store(db_path)?;
+    let folders = store.folders()?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&folders)?);
+    } else {
+        print_folders(&folders);
+    }
+    Ok(())
+}
+
+fn folder_move(db_path: &Path, args: FolderMoveArgs, json: bool) -> Result<(), NgError> {
+    let mut store = if args.apply {
+        open_store_for_writing(db_path)?
+    } else {
+        open_store(db_path)?
+    };
+    let plan = store.plan_folder_move(&args.source, &args.target)?;
+    if args.apply {
+        store.apply_folder_move(&plan)?;
+    }
+    let view = folder_move_view(&plan, args.apply);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_folder_move(&view);
+    }
+    Ok(())
+}
+
+fn note_command(db_path: &Path, command: NoteCommand, json: bool) -> Result<(), NgError> {
+    match command {
+        NoteCommand::Move(args) => note_move(db_path, args, json),
+    }
+}
+
+fn note_move(db_path: &Path, args: NoteMoveArgs, json: bool) -> Result<(), NgError> {
+    let mut store = if args.apply {
+        open_store_for_writing(db_path)?
+    } else {
+        open_store(db_path)?
+    };
+    let plan = store.plan_note_move(&args.note_id, &args.folder)?;
+    if args.apply {
+        store.apply_note_move(&plan)?;
+    }
+    let view = note_move_view(&plan, args.apply);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print_note_move(&view);
+    }
+    Ok(())
+}
+
 fn print_stats(stats: &StoreStats) {
     println!("notes: {}", stats.notes);
     println!("folders: {}", stats.folders);
     println!("accounts: {}", stats.accounts);
 }
 
+fn print_folders(folders: &[FolderEntry]) {
+    println!("folders: {}", folders.len());
+    for folder in folders {
+        println!("{}", folder.account_path);
+    }
+}
+
+fn folder_move_view(plan: &FolderMovePlan, applied: bool) -> FolderMoveView {
+    FolderMoveView {
+        status: if applied { "ok" } else { "dry-run" },
+        applied,
+        changed: plan.will_change,
+        source: plan.source_path.clone(),
+        target: plan.target_path.clone(),
+        descendant_folders: plan.descendant_folders,
+        notes: plan.notes,
+    }
+}
+
+fn print_folder_move(view: &FolderMoveView) {
+    println!("folder-move: {}", view.status);
+    println!("source: {}", view.source);
+    println!("target: {}", view.target);
+    println!("changed: {}", view.changed);
+    println!("descendant-folders: {}", view.descendant_folders);
+    println!("notes: {}", view.notes);
+    if !view.applied {
+        println!("next: rerun with --apply to write this folder move");
+    }
+}
+
+fn note_move_view(plan: &NoteMovePlan, applied: bool) -> NoteMoveView {
+    NoteMoveView {
+        status: if applied { "ok" } else { "dry-run" },
+        applied,
+        changed: plan.will_change,
+        note_id: plan.note_id.clone(),
+        note_db_id: plan.note_db_id,
+        note_title: plan.note_title.clone(),
+        source_folder_path: plan.source_folder_path.clone(),
+        target_folder_path: plan.target_folder_path.clone(),
+    }
+}
+
+fn print_note_move(view: &NoteMoveView) {
+    println!("note-move: {}", view.status);
+    println!("note-id: {}", view.note_id);
+    println!("title: {}", truncate(&view.note_title, 96));
+    println!("source-folder: {}", view.source_folder_path);
+    println!("target-folder: {}", view.target_folder_path);
+    println!("changed: {}", view.changed);
+    println!("applied: {}", view.applied);
+    if !view.applied {
+        println!(
+            "next: rerun with --apply to write this note move, then rebuild caches with ng index"
+        );
+    }
+}
+
 fn print_hits(hits: &[NoteHit]) {
     println!("hits: {}", hits.len());
     for hit in hits {
-        let folder = hit.folder.as_deref().unwrap_or("-");
+        let folder = hit
+            .folder_path
+            .as_deref()
+            .or(hit.folder.as_deref())
+            .unwrap_or("-");
         let title = truncate(&hit.title, 72);
         let snippet = truncate(hit.snippet.as_deref().unwrap_or(""), 96);
         println!("{}  {}  {}", hit.id, folder, title);
