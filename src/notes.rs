@@ -678,9 +678,12 @@ fn verify_schema(conn: &Connection) -> Result<(), NgError> {
 }
 
 fn base_note_query() -> String {
+    // Z_UUID is read via a scalar subquery (not a cross-join) so a Z_METADATA
+    // table containing zero or more than one row still yields exactly one
+    // result row per note. Matches the pattern used in active_note_by_db_id.
     r#"
         SELECT
-            'x-coredata://' || COALESCE(zmd.Z_UUID, '') || '/ICNote/p' || note.Z_PK AS id,
+            'x-coredata://' || COALESCE((SELECT Z_UUID FROM Z_METADATA LIMIT 1), '') || '/ICNote/p' || note.Z_PK AS id,
             note.Z_PK AS db_id,
             note.ZTITLE1 AS title,
             folder.Z_PK AS folder_id,
@@ -691,7 +694,6 @@ fn base_note_query() -> String {
         FROM ZICCLOUDSYNCINGOBJECT AS note
         LEFT JOIN ZICCLOUDSYNCINGOBJECT AS folder ON note.ZFOLDER = folder.Z_PK
         LEFT JOIN ZICNOTEDATA AS data ON note.ZNOTEDATA = data.Z_PK
-        LEFT JOIN Z_METADATA AS zmd ON 1=1
         WHERE note.ZTITLE1 IS NOT NULL
           AND COALESCE(note.ZMARKEDFORDELETION, 0) != 1
     "#
@@ -1088,15 +1090,24 @@ fn parent_chain_contains(
 }
 
 fn descendant_folder_ids(raw: &HashMap<i64, RawFolder>, source_id: i64) -> Vec<i64> {
+    // Apple Notes shouldn't produce parent cycles, but iCloud merge artifacts
+    // and corrupt stores can. `seen` keeps a cycle from spinning this DFS into
+    // an unbounded loop and an unbounded `Vec` (which would later blow up
+    // `count_notes_in_folders`'s SQL parameter list). The traversal still
+    // visits each reachable descendant exactly once.
     let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    seen.insert(source_id);
     let mut stack = vec![source_id];
     while let Some(parent_id) = stack.pop() {
         for folder in raw
             .values()
             .filter(|folder| folder.parent_id == Some(parent_id))
         {
-            out.push(folder.id);
-            stack.push(folder.id);
+            if seen.insert(folder.id) {
+                out.push(folder.id);
+                stack.push(folder.id);
+            }
         }
     }
     out
@@ -1255,6 +1266,61 @@ mod tests {
                 .unwrap_or_default()
                 .contains("body-only alpha phrase")
         );
+    }
+
+    /// Regression: an earlier `LEFT JOIN Z_METADATA AS zmd ON 1=1` produced
+    /// one duplicated row per extra Z_METADATA row. Core Data stores usually
+    /// have a single row, but legacy/merged stores can have more. The query
+    /// must read Z_UUID via a scalar subquery so each note appears once.
+    #[test]
+    fn search_is_not_duplicated_when_z_metadata_has_multiple_rows() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute("INSERT INTO Z_METADATA (Z_UUID) VALUES ('SECOND-UUID')", [])
+            .unwrap();
+
+        let hits = store.search("refund", None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "search should not duplicate notes");
+
+        let indexed = store.all_indexed_notes().unwrap();
+        assert_eq!(indexed.len(), 2, "index should not duplicate notes");
+    }
+
+    /// Regression: a parent cycle in the folder table (e.g. corrupt iCloud
+    /// merge state where folder A.parent == B and B.parent == A) used to make
+    /// `descendant_folder_ids` loop forever and grow an unbounded Vec, which
+    /// would then explode `count_notes_in_folders`'s IN-clause. Cycles must
+    /// terminate the traversal cleanly.
+    #[test]
+    fn descendant_folder_ids_terminates_on_cyclic_parent_chain() {
+        let mut raw = HashMap::new();
+        raw.insert(
+            1,
+            RawFolder {
+                id: 1,
+                name: "A".into(),
+                parent_id: Some(2),
+                account_id: Some(99),
+                account: Some("iCloud".into()),
+            },
+        );
+        raw.insert(
+            2,
+            RawFolder {
+                id: 2,
+                name: "B".into(),
+                parent_id: Some(1),
+                account_id: Some(99),
+                account: Some("iCloud".into()),
+            },
+        );
+
+        let descendants = descendant_folder_ids(&raw, 1);
+        assert_eq!(descendants, vec![2], "cycle must visit B exactly once");
+
+        let descendants = descendant_folder_ids(&raw, 2);
+        assert_eq!(descendants, vec![1], "cycle must visit A exactly once");
     }
 
     fn fixture_body_blob(text: &str) -> Vec<u8> {

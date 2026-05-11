@@ -100,6 +100,8 @@ fn text_candidate(chunk: &[u8]) -> Option<String> {
         return None;
     }
 
+    // The 3-char/alphanumeric guard above guarantees total > 0, so the ratio
+    // is well-defined.
     let mut printable = 0usize;
     let mut total = 0usize;
     for ch in text.chars() {
@@ -108,7 +110,7 @@ fn text_candidate(chunk: &[u8]) -> Option<String> {
             printable += 1;
         }
     }
-    if total == 0 || printable * 100 / total < 85 {
+    if printable * 100 / total < 85 {
         return None;
     }
 

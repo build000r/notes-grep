@@ -256,12 +256,18 @@ fn index(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<
     let dir = cache_dir(cache_override)?;
     fs::create_dir_all(&dir)?;
     let cache_file = notes_cache_file(Some(dir.clone()))?;
-    let mut writer = BufWriter::new(File::create(&cache_file)?);
-    for note in &notes {
-        serde_json::to_writer(&mut writer, note)?;
-        writer.write_all(b"\n")?;
+    // Write to sibling .tmp files first and rename on success so a partial
+    // write (disk full, ctrl-C mid-loop, panic in body decode) cannot leave
+    // `ng search` reading a truncated JSONL or stale-but-current manifest.
+    let cache_tmp = with_tmp_suffix(&cache_file);
+    {
+        let mut writer = BufWriter::new(File::create(&cache_tmp)?);
+        for note in &notes {
+            serde_json::to_writer(&mut writer, note)?;
+            writer.write_all(b"\n")?;
+        }
+        writer.flush()?;
     }
-    writer.flush()?;
 
     let manifest = dir.join("manifest.json");
     let manifest_view = IndexView {
@@ -271,8 +277,9 @@ fn index(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<
         notes: notes.len(),
         body_notes,
     };
+    let manifest_tmp = with_tmp_suffix(&manifest);
     fs::write(
-        manifest,
+        &manifest_tmp,
         serde_json::to_vec_pretty(&serde_json::json!({
             "tool": "ng",
             "indexed_at_unix": unix_now(),
@@ -282,6 +289,8 @@ fn index(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<
             "body_notes": manifest_view.body_notes
         }))?,
     )?;
+    fs::rename(&cache_tmp, &cache_file)?;
+    fs::rename(&manifest_tmp, &manifest)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&manifest_view)?);
@@ -507,7 +516,7 @@ fn notes_cache_file(override_dir: Option<PathBuf>) -> Result<PathBuf, NgError> {
     Ok(cache_dir(override_dir)?.join("notes.jsonl"))
 }
 
-fn read_indexed_notes(cache_file: &PathBuf) -> Result<Vec<IndexedNote>, NgError> {
+fn read_indexed_notes(cache_file: &Path) -> Result<Vec<IndexedNote>, NgError> {
     let reader = BufReader::new(File::open(cache_file)?);
     let mut notes = Vec::new();
     for line in reader.lines() {
@@ -518,6 +527,15 @@ fn read_indexed_notes(cache_file: &PathBuf) -> Result<Vec<IndexedNote>, NgError>
         notes.push(serde_json::from_str(&line)?);
     }
     Ok(notes)
+}
+
+fn with_tmp_suffix(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|name| name.to_os_string())
+        .unwrap_or_default();
+    name.push(".tmp");
+    path.with_file_name(name)
 }
 
 fn unix_now() -> u64 {
