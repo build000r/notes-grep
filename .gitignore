@@ -3,3 +3,8 @@ lcov.info
 .DS_Store
 .claude/skills/
 .codex/skills/
+
+# beads local database
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal
