@@ -5,6 +5,20 @@ edition = "2024"
 description = "Fast local Apple Notes search CLI"
 license = "MIT"
 repository = "https://github.com/build000r/notes-grep"
+readme = "README.md"
+keywords = ["apple-notes", "notes", "search", "cli"]
+categories = ["command-line-utilities"]
+rust-version = "1.85"
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs/CLI_CONTRACT.md",
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]
 
 [dependencies]
 clap = { version = "4.5.51", features = ["derive", "env"] }
