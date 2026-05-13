@@ -1,0 +1,106 @@
+# Copy this file into a run directory before editing it.
+# It is a planning artifact, not an apply script.
+version: 1
+account_scope: iCloud
+run_label: apple-notes-organization
+mode: plan # plan | full-drain
+
+evidence:
+  cache_path: "~/Library/Application Support/notes-grep/notes.jsonl"
+  folder_list_path: ""
+  audit_report_path: ""
+  notes:
+    total: null
+    folders: null
+    accounts: null
+
+source_folder:
+  path: ""
+  starting_count: null
+  target_final_count: 0
+
+full_drain:
+  enabled: false
+  classification_artifact: ""
+  fallback_destination: ""
+  dryrun_pass_path: ""
+  dryrun_fail_path: ""
+  apply_pass_path: ""
+  apply_fail_path: ""
+  completion_evidence_path: ""
+  blocker_count: 0
+  blockers: []
+
+target_model:
+  top_level_folders:
+    - Inbox
+    - Active
+    - Areas
+    - Resources
+    - People
+    - Admin
+    - Logs
+    - Someday
+    - Archive
+  naming_notes:
+    - "Preserve existing user language unless there is a clear conflict."
+    - "Use numbered roots only when the account already uses that convention."
+
+folder_moves:
+  # Each entry maps to: ng folder mv "source" "target"
+  - source: ""
+    target: ""
+    reason: ""
+    expected_descendant_folders: null
+    expected_notes: null
+    dry_run_status: pending
+
+note_move_queries:
+  # Each entry requires reviewed stable note IDs before apply.
+  - query: ""
+    current_folder: ""
+    target_folder: ""
+    reason: ""
+    review_required: true
+    note_ids: []
+
+tag_recommendations:
+  # Tags must be applied in Apple Notes UI or another note-editing tool.
+  - tag: "#status-review"
+    meaning: ""
+    applies_to_query: ""
+    smart_folder: ""
+
+smart_folder_recipes:
+  - name: ""
+    filters: []
+    purpose: ""
+    manual_setup_notes: ""
+
+exclusions:
+  locked_notes: []
+  shared_folders: []
+  cross_account_items: []
+  ambiguous_paths: []
+  unsupported_by_ng: []
+
+apply_gate:
+  approved_by_user: false
+  approved_at: ""
+  dry_runs_passed: false
+  batch_size: null
+  verification_commands:
+    - "ng index --json"
+    - "python3 \"$SKILL_DIR/scripts/audit_notes_cache.py\""
+    - "ng --json folder list"
+
+completion_audit:
+  fresh_index_after_apply: false
+  source_final_count: null
+  total_notes_preserved: null
+  classified_count: null
+  dryrun_pass_count: null
+  dryrun_fail_count: null
+  apply_pass_count: null
+  apply_fail_count: null
+  remaining_blockers: []
