@@ -4,6 +4,14 @@ lcov.info
 .claude/skills/
 .codex/skills/
 
+# Python artifacts for repo-local skill helpers
+__pycache__/
+*.pyc
+
+# Packaged skill artifacts
+*.skill
+dist/
+
 # beads local database
 .beads/*.db
 .beads/*.db-shm
