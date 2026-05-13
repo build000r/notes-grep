@@ -43,6 +43,15 @@ cargo install --path .
 ng doctor
 ```
 
+For agent shells on this machine, `~/.local/bin` is already on `PATH` while
+`~/.cargo/bin` may not be. Use the repo target to install `ng` where those
+shells can resolve it:
+
+```bash
+make install-local
+ng doctor
+```
+
 If macOS blocks access to the Notes database, grant Full Disk Access to the
 terminal or agent process that runs `ng`.
 
