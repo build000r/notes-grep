@@ -1,0 +1,99 @@
+<!-- mmdx
+{
+  "entry": "main",
+  "shortLink": { "username": "buildooor", "slug": "notes-grep-project-status" },
+  "links": [
+    { "from": "main", "label": "Open proof status", "to": "proof-status", "title": "Open notes-grep proof status" },
+    { "from": "main", "label": "Open primary flows", "to": "primary-flows", "title": "Open notes-grep primary flows" },
+    { "from": "main", "label": "Open next move", "to": "next-move", "title": "Open notes-grep next move" }
+  ]
+}
+-->
+
+## chart main Notes Grep Project Status Crux
+```mermaid
+flowchart LR
+  vision["notes-grep: rg-style Apple Notes search CLI"]:::gray
+  cli["GREEN full-body cache and guarded move code have tests"]:::green
+  tests["GREEN cargo test passed 26 tests"]:::green
+  realdb["YELLOW real Notes DB and Full Disk proof: notes-grep-portfolio-reality-idea-plan-0au.7"]:::yellow
+  engine["YELLOW next search engine only after real DB proof: notes-grep-portfolio-reality-idea-plan-0au.8"]:::yellow
+  perf["YELLOW large DB profiling: notes-grep-portfolio-reality-idea-plan-0au.9"]:::yellow
+  vision --> cli --> tests --> realdb --> engine
+  tests --> perf
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart epic-gantt Notes Grep Epic Status
+```mermaid
+gantt
+  title notes-grep status as of 2026-05-28
+  dateFormat YYYY-MM-DD
+  section GREEN Proven
+  GREEN cargo tests for cache search and moves :done, 2026-05-28, 1d
+  section YELLOW Planned
+  YELLOW publish status 0au.6 :active, 2026-05-28, 1d
+  YELLOW real Notes DB proof 0au.7 :active, 2026-05-29, 1d
+  YELLOW search engine decision 0au.8 :active, 2026-05-30, 2d
+  YELLOW profiling and refactor 0au.9 0au.10 :active, 2026-06-01, 2d
+```
+
+## chart epic-map Notes Grep Dependency Map
+```mermaid
+flowchart TD
+  doctor["GREEN doctor stats index search and move surfaces"]:::green
+  fixtures["GREEN SQLite fixture tests"]:::green
+  realdb["YELLOW macOS Notes permission proof 0au.7"]:::yellow
+  search["YELLOW regex Tantivy semantic decision depends on realdb 0au.8"]:::yellow
+  perf["YELLOW index search move benchmark 0au.9"]:::yellow
+  refactor["YELLOW output contract refactor depends on perf 0au.10"]:::yellow
+  doctor --> fixtures --> realdb --> search
+  fixtures --> perf --> refactor
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+```
+
+## chart primary-flows Notes Grep Primary Flows
+```mermaid
+flowchart TD
+  user["Local Apple Notes user"]:::gray
+  doctor["GREEN diagnose database access"]:::green
+  index["GREEN build full-body JSONL cache"]:::green
+  search["GREEN search title snippet and decoded body"]:::green
+  move["GREEN guarded folder and note moves"]:::green
+  real["YELLOW prove against real local Notes DB 0au.7"]:::yellow
+  user --> doctor --> index --> search
+  user --> move --> real
+  search --> real
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
+## chart proof-status Notes Grep Proof Status
+```mermaid
+flowchart TD
+  read["GREEN README read"]:::green
+  tests["GREEN cargo test passed 10 unit and 16 CLI tests"]:::green
+  mac["YELLOW ng doctor against real database not run 0au.7"]:::yellow
+  perf["YELLOW no large DB timing baseline 0au.9"]:::yellow
+  read --> tests --> mac --> perf
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+```
+
+## chart next-move Notes Grep Next Move
+```mermaid
+flowchart TD
+  rank["Power-map: end user is the local Notes owner searching their own data"]:::gray
+  one["1 real Notes DB doctor and index proof 0au.7"]:::yellow
+  two["2 decide regex Tantivy or semantic layer 0au.8"]:::yellow
+  three["3 benchmark large DB paths 0au.9"]:::yellow
+  four["4 refactor CLI and JSON output contracts 0au.10"]:::yellow
+  rank --> one --> two --> three --> four
+  classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
+  classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
+```
+
