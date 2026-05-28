@@ -16,9 +16,9 @@ flowchart LR
   vision["notes-grep: rg-style Apple Notes search CLI"]:::gray
   cli["GREEN full-body cache and guarded move code have tests"]:::green
   tests["GREEN cargo test passed 26 tests"]:::green
-  realdb["YELLOW real Notes DB and Full Disk proof: notes-grep-portfolio-reality-idea-plan-0au.7"]:::yellow
-  engine["YELLOW next search engine only after real DB proof: notes-grep-portfolio-reality-idea-plan-0au.8"]:::yellow
-  perf["YELLOW large DB profiling: notes-grep-portfolio-reality-idea-plan-0au.9"]:::yellow
+  realdb["GREEN real Notes DB and Full Disk proof: done"]:::green
+  engine["GREEN search engine decision: stay linear JSONL scan"]:::green
+  perf["GREEN large DB profiling: all paths under 430ms"]:::green
   vision --> cli --> tests --> realdb --> engine
   tests --> perf
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
@@ -33,11 +33,11 @@ gantt
   dateFormat YYYY-MM-DD
   section GREEN Proven
   GREEN cargo tests for cache search and moves :done, 2026-05-28, 1d
+  GREEN real Notes DB proof 0au.7 :done, 2026-05-28, 1d
+  GREEN profiling all hot paths 0au.9 :done, 2026-05-28, 1d
+  GREEN search engine decision 0au.8 :done, 2026-05-28, 1d
   section YELLOW Planned
-  YELLOW publish status 0au.6 :active, 2026-05-28, 1d
-  YELLOW real Notes DB proof 0au.7 :active, 2026-05-29, 1d
-  YELLOW search engine decision 0au.8 :active, 2026-05-30, 2d
-  YELLOW profiling and refactor 0au.9 0au.10 :active, 2026-06-01, 2d
+  YELLOW CLI output refactor 0au.10 :active, 2026-05-29, 2d
 ```
 
 ## chart epic-map Notes Grep Dependency Map
@@ -45,10 +45,10 @@ gantt
 flowchart TD
   doctor["GREEN doctor stats index search and move surfaces"]:::green
   fixtures["GREEN SQLite fixture tests"]:::green
-  realdb["YELLOW macOS Notes permission proof 0au.7"]:::yellow
-  search["YELLOW regex Tantivy semantic decision depends on realdb 0au.8"]:::yellow
-  perf["YELLOW index search move benchmark 0au.9"]:::yellow
-  refactor["YELLOW output contract refactor depends on perf 0au.10"]:::yellow
+  realdb["GREEN macOS Notes permission proof 0au.7"]:::green
+  search["GREEN search engine decision: stay linear 0au.8"]:::green
+  perf["GREEN index search move benchmark 0au.9"]:::green
+  refactor["YELLOW output contract refactor 0au.10"]:::yellow
   doctor --> fixtures --> realdb --> search
   fixtures --> perf --> refactor
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
@@ -63,7 +63,7 @@ flowchart TD
   index["GREEN build full-body JSONL cache"]:::green
   search["GREEN search title snippet and decoded body"]:::green
   move["GREEN guarded folder and note moves"]:::green
-  real["YELLOW prove against real local Notes DB 0au.7"]:::yellow
+  real["GREEN proved against real local Notes DB 0au.7"]:::green
   user --> doctor --> index --> search
   user --> move --> real
   search --> real
@@ -77,8 +77,8 @@ flowchart TD
 flowchart TD
   read["GREEN README read"]:::green
   tests["GREEN cargo test passed 10 unit and 16 CLI tests"]:::green
-  mac["YELLOW ng doctor against real database not run 0au.7"]:::yellow
-  perf["YELLOW no large DB timing baseline 0au.9"]:::yellow
+  mac["GREEN ng doctor against real database: 6469 notes 234 folders"]:::green
+  perf["GREEN profiling done: index 426ms search under 30ms moves under 16ms"]:::green
   read --> tests --> mac --> perf
   classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
@@ -88,11 +88,12 @@ flowchart TD
 ```mermaid
 flowchart TD
   rank["Power-map: end user is the local Notes owner searching their own data"]:::gray
-  one["1 real Notes DB doctor and index proof 0au.7"]:::yellow
-  two["2 decide regex Tantivy or semantic layer 0au.8"]:::yellow
-  three["3 benchmark large DB paths 0au.9"]:::yellow
+  one["1 real Notes DB doctor and index proof 0au.7 DONE"]:::green
+  two["2 search engine decision: stay linear 0au.8 DONE"]:::green
+  three["3 benchmark large DB paths 0au.9 DONE"]:::green
   four["4 refactor CLI and JSON output contracts 0au.10"]:::yellow
   rank --> one --> two --> three --> four
+  classDef green fill:#dff7df,stroke:#20833a,stroke-width:2px,color:#0f2f18
   classDef yellow fill:#fff3bf,stroke:#b7791f,stroke-width:2px,color:#3a2a00
   classDef gray fill:#eef2f7,stroke:#64748b,stroke-width:1px,color:#111827
 ```
