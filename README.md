@@ -16,10 +16,10 @@ moves:
 - `ng doctor` validates access to `NoteStore.sqlite`
 - `ng stats` prints basic store counts
 - `ng index` writes a JSONL cache with title, snippet, folder, modified time,
-  stable note ID, nested folder path, and decoded body text from
+  stable note ID, nested folder path, account-prefixed folder path, and decoded body text from
   `ZICNOTEDATA.ZDATA`
 - `ng search QUERY` searches the warmed JSONL cache when it exists, falling
-  back to direct title/snippet SQLite search before the first index
+  back to direct title/snippet SQLite search before the first matching index
 - `ng folder list` prints account-prefixed nested folder paths
 - `ng folder mv SOURCE TARGET` previews a folder rename or nested move
 - `ng folder mv SOURCE TARGET --apply` writes the guarded same-account move to
@@ -106,6 +106,10 @@ current folder.
 Applied note moves update the Notes database directly. Rebuild warmed caches
 with `ng index` after `ng note mv ... --apply`; otherwise `ng search` may read a
 stale `notes.jsonl` folder path until the cache is refreshed.
+
+Warmed cache search is tied to the database path recorded by `ng index`. If a
+cache directory contains records for a different `--db`, `ng search` falls back
+to the selected database instead of returning unrelated cached notes.
 
 ## Design Rules
 

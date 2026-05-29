@@ -65,6 +65,8 @@ pub struct NoteHit {
     pub folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_path: Option<String>,
     pub snippet: Option<String>,
     pub modified: Option<String>,
 }
@@ -77,6 +79,8 @@ pub struct IndexedNote {
     pub folder: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_path: Option<String>,
     pub snippet: Option<String>,
     pub modified: Option<String>,
     pub body: Option<String>,
@@ -115,6 +119,9 @@ pub struct NoteMovePlan {
     pub source_folder_path: String,
     pub target_folder_id: i64,
     pub target_folder_path: String,
+    pub target_folder_name: String,
+    pub target_folder_parent_id: Option<i64>,
+    pub target_account_id: i64,
     pub will_change: bool,
 }
 
@@ -168,15 +175,19 @@ impl NotesStore {
     pub fn all_indexed_notes(&self) -> Result<Vec<IndexedNote>, NgError> {
         let mut sql = base_note_query();
         sql.push_str(" ORDER BY note.ZMODIFICATIONDATE1 DESC");
-        let folder_paths = self.folder_path_map()?;
+        let folder_paths = self.folder_paths_by_id()?;
 
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_indexed_note)?;
         let mut notes = rows.collect::<Result<Vec<_>, _>>()?;
         for note in &mut notes {
-            note.note.folder_path = note
+            if let Some(paths) = note
                 .folder_id
-                .and_then(|folder_id| folder_paths.get(&folder_id).cloned());
+                .and_then(|folder_id| folder_paths.get(&folder_id))
+            {
+                note.note.folder_path = Some(paths.path.clone());
+                note.note.account_path = Some(paths.account_path.clone());
+            }
         }
         Ok(notes.into_iter().map(|note| note.note).collect())
     }
@@ -188,12 +199,14 @@ impl NotesStore {
         limit: usize,
     ) -> Result<Vec<NoteHit>, NgError> {
         let limit = limit.clamp(1, 10_000);
-        let pattern = format!("%{query}%");
+        let pattern = like_contains_pattern(query);
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if !query.is_empty() {
-            sql.push_str(" AND (note.ZTITLE1 LIKE ? OR COALESCE(note.ZSNIPPET, '') LIKE ?)");
+            sql.push_str(
+                " AND (note.ZTITLE1 LIKE ? ESCAPE '\\' OR COALESCE(note.ZSNIPPET, '') LIKE ? ESCAPE '\\')",
+            );
             params.push(Box::new(pattern.clone()));
             params.push(Box::new(pattern));
         }
@@ -203,15 +216,19 @@ impl NotesStore {
             params.push(Box::new(limit as i64));
         }
 
-        let folder_paths = self.folder_path_map()?;
+        let folder_paths = self.folder_paths_by_id()?;
         let mut stmt = self.conn.prepare(&sql)?;
         let params_ref: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
         let rows = stmt.query_map(params_ref.as_slice(), row_to_hit)?;
         let mut hits = rows.collect::<Result<Vec<_>, _>>()?;
         for hit in &mut hits {
-            hit.note.folder_path = hit
+            if let Some(paths) = hit
                 .folder_id
-                .and_then(|folder_id| folder_paths.get(&folder_id).cloned());
+                .and_then(|folder_id| folder_paths.get(&folder_id))
+            {
+                hit.note.folder_path = Some(paths.path.clone());
+                hit.note.account_path = Some(paths.account_path.clone());
+            }
         }
         let hits = hits
             .into_iter()
@@ -243,6 +260,12 @@ impl NotesStore {
             return Err(NgError::Command(format!(
                 "cross-account folder moves are not supported: '{}' -> '{}'",
                 source.account_path, target.path
+            )));
+        }
+        if source.account_id.is_none() || target.account_id.is_none() {
+            return Err(NgError::Command(format!(
+                "folder account is unknown; refusing to move '{}' without a proven same-account boundary",
+                source.account_path
             )));
         }
 
@@ -299,6 +322,17 @@ impl NotesStore {
         let tx = self.conn.transaction()?;
         let updated = tx.execute(
             r#"
+            WITH RECURSIVE descendants(id) AS (
+                SELECT child.Z_PK
+                FROM ZICCLOUDSYNCINGOBJECT AS child
+                WHERE child.ZPARENT = ?5
+                  AND child.Z_PK != ?5
+                UNION
+                SELECT child.Z_PK
+                FROM ZICCLOUDSYNCINGOBJECT AS child
+                JOIN descendants ON child.ZPARENT = descendants.id
+                WHERE child.Z_PK != ?5
+            )
             UPDATE ZICCLOUDSYNCINGOBJECT
             SET ZTITLE2 = ?1,
                 ZPARENT = ?2,
@@ -307,7 +341,41 @@ impl NotesStore {
                 Z_OPT = COALESCE(Z_OPT, 0) + 1
             WHERE Z_PK = ?5
               AND ZTITLE2 IS NOT NULL
+              AND ZACCOUNT8 IS NOT NULL
+              AND ZACCOUNT8 = ?3
               AND COALESCE(ZMARKEDFORDELETION, 0) != 1
+              AND (
+                  (?2 IS NULL AND ?3 IS NOT NULL)
+                  OR EXISTS (
+                      SELECT 1
+                      FROM ZICCLOUDSYNCINGOBJECT AS target_parent
+                      WHERE target_parent.Z_PK = ?2
+                        AND target_parent.ZTITLE2 IS NOT NULL
+                        AND target_parent.ZACCOUNT8 = ?3
+                        AND COALESCE(target_parent.ZMARKEDFORDELETION, 0) != 1
+                  )
+              )
+              AND (
+                  ?2 IS NULL
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM descendants
+                      WHERE descendants.id = ?2
+                  )
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM ZICCLOUDSYNCINGOBJECT AS sibling
+                  WHERE sibling.Z_PK != ?5
+                    AND sibling.ZTITLE2 IS NOT NULL
+                    AND LOWER(sibling.ZTITLE2) = LOWER(?1)
+                    AND sibling.ZACCOUNT8 = ?3
+                    AND (
+                        (sibling.ZPARENT IS NULL AND ?2 IS NULL)
+                        OR sibling.ZPARENT = ?2
+                    )
+                    AND COALESCE(sibling.ZMARKEDFORDELETION, 0) != 1
+              )
             "#,
             (
                 &plan.new_name,
@@ -319,7 +387,7 @@ impl NotesStore {
         )?;
         if updated != 1 {
             return Err(NgError::Command(format!(
-                "folder move expected to update 1 row, updated {updated}"
+                "folder move could not be applied because the source or target changed; expected 1 row, updated {updated}"
             )));
         }
         tx.commit()?;
@@ -349,7 +417,20 @@ impl NotesStore {
         })?;
         let target_folder = resolve_folder(&folders, target_folder_path)?;
 
-        if source_folder.account_id != target_folder.account_id {
+        let Some(source_account_id) = source_folder.account_id else {
+            return Err(NgError::Command(format!(
+                "folder account is unknown; refusing to move note '{}' from '{}'",
+                note.id, source_folder.account_path
+            )));
+        };
+        let Some(target_account_id) = target_folder.account_id else {
+            return Err(NgError::Command(format!(
+                "folder account is unknown; refusing to move note '{}' to '{}'",
+                note.id, target_folder.account_path
+            )));
+        };
+
+        if source_account_id != target_account_id {
             return Err(NgError::Command(format!(
                 "cross-account note moves are not supported: '{}' -> '{}'",
                 source_folder.account_path, target_folder.account_path
@@ -363,7 +444,10 @@ impl NotesStore {
             source_folder_id: source_folder.id,
             source_folder_path: source_folder.account_path.clone(),
             target_folder_id: target_folder.id,
-            target_folder_path: target_folder.account_path,
+            target_folder_path: target_folder.account_path.clone(),
+            target_folder_name: target_folder.name,
+            target_folder_parent_id: target_folder.parent_id,
+            target_account_id,
             will_change: source_folder.id != target_folder.id,
         })
     }
@@ -390,12 +474,19 @@ impl NotesStore {
                   SELECT 1
                   FROM ZICCLOUDSYNCINGOBJECT AS source_folder
                   JOIN ZICCLOUDSYNCINGOBJECT AS target_folder ON target_folder.Z_PK = ?1
-                  WHERE source_folder.Z_PK = ?4
+                    WHERE source_folder.Z_PK = ?4
                     AND source_folder.ZTITLE2 IS NOT NULL
                     AND target_folder.ZTITLE2 IS NOT NULL
+                    AND target_folder.ZTITLE2 = ?5
+                    AND (
+                        (target_folder.ZPARENT IS NULL AND ?6 IS NULL)
+                        OR target_folder.ZPARENT = ?6
+                    )
                     AND COALESCE(source_folder.ZMARKEDFORDELETION, 0) != 1
                     AND COALESCE(target_folder.ZMARKEDFORDELETION, 0) != 1
-                    AND COALESCE(source_folder.ZACCOUNT8, -1) = COALESCE(target_folder.ZACCOUNT8, -1)
+                    AND source_folder.ZACCOUNT8 IS NOT NULL
+                    AND source_folder.ZACCOUNT8 = ?7
+                    AND target_folder.ZACCOUNT8 = ?7
               )
             "#,
             (
@@ -403,11 +494,14 @@ impl NotesStore {
                 now,
                 plan.note_db_id,
                 plan.source_folder_id,
+                &plan.target_folder_name,
+                plan.target_folder_parent_id,
+                plan.target_account_id,
             ),
         )?;
         if updated != 1 {
             return Err(NgError::Command(format!(
-                "note move expected to update 1 row, updated {updated}"
+                "note move could not be applied because the source or target changed; expected 1 row, updated {updated}"
             )));
         }
         tx.commit()?;
@@ -554,7 +648,7 @@ impl NotesStore {
         Ok(folders)
     }
 
-    fn folder_path_map(&self) -> Result<HashMap<i64, String>, NgError> {
+    fn folder_paths_by_id(&self) -> Result<HashMap<i64, FolderPaths>, NgError> {
         if !self.has_column("ZICCLOUDSYNCINGOBJECT", "ZPARENT")?
             || !self.has_column("ZICCLOUDSYNCINGOBJECT", "ZACCOUNT8")?
         {
@@ -563,7 +657,15 @@ impl NotesStore {
         let raw = self.raw_folders()?;
         Ok(build_folder_entries(&raw)
             .into_iter()
-            .map(|folder| (folder.id, folder.path))
+            .map(|folder| {
+                (
+                    folder.id,
+                    FolderPaths {
+                        path: folder.path,
+                        account_path: folder.account_path,
+                    },
+                )
+            })
             .collect())
     }
 
@@ -612,7 +714,7 @@ impl NotesStore {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
-                'x-coredata://' || COALESCE((SELECT Z_UUID FROM Z_METADATA LIMIT 1), '') || '/ICNote/p' || note.Z_PK AS id,
+                'x-coredata://' || COALESCE((SELECT Z_UUID FROM Z_METADATA ORDER BY rowid LIMIT 1), '') || '/ICNote/p' || note.Z_PK AS id,
                 note.Z_PK AS db_id,
                 note.ZTITLE1 AS title,
                 note.ZFOLDER AS folder_id
@@ -659,6 +761,7 @@ impl IndexedNote {
             title: self.title.clone(),
             folder: self.folder.clone(),
             folder_path: self.folder_path.clone(),
+            account_path: self.account_path.clone(),
             snippet: best_snippet(self, query),
             modified: self.modified.clone(),
         }
@@ -680,10 +783,11 @@ fn verify_schema(conn: &Connection) -> Result<(), NgError> {
 fn base_note_query() -> String {
     // Z_UUID is read via a scalar subquery (not a cross-join) so a Z_METADATA
     // table containing zero or more than one row still yields exactly one
-    // result row per note. Matches the pattern used in active_note_by_db_id.
+    // result row per note. `rowid` makes the chosen metadata row deterministic
+    // when legacy/merged stores contain duplicate rows.
     r#"
         SELECT
-            'x-coredata://' || COALESCE((SELECT Z_UUID FROM Z_METADATA LIMIT 1), '') || '/ICNote/p' || note.Z_PK AS id,
+            'x-coredata://' || COALESCE((SELECT Z_UUID FROM Z_METADATA ORDER BY rowid LIMIT 1), '') || '/ICNote/p' || note.Z_PK AS id,
             note.Z_PK AS db_id,
             note.ZTITLE1 AS title,
             folder.Z_PK AS folder_id,
@@ -710,6 +814,11 @@ struct RawIndexedNote {
     folder_id: Option<i64>,
 }
 
+struct FolderPaths {
+    path: String,
+    account_path: String,
+}
+
 fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawNoteHit> {
     Ok(RawNoteHit {
         note: NoteHit {
@@ -718,6 +827,7 @@ fn row_to_hit(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawNoteHit> {
             title: normalized_string(row, 2)?,
             folder: normalized_optional_string(row, 4)?,
             folder_path: None,
+            account_path: None,
             snippet: normalized_optional_string(row, 5)?,
             modified: row.get(6)?,
         },
@@ -738,6 +848,7 @@ fn row_to_indexed_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawIndexedNo
             title: normalized_string(row, 2)?,
             folder: normalized_optional_string(row, 4)?,
             folder_path: None,
+            account_path: None,
             snippet: normalized_optional_string(row, 5)?,
             modified: row.get(6)?,
             body,
@@ -773,11 +884,15 @@ fn indexed_note_matches(note: &IndexedNote, query: &str) -> bool {
 }
 
 fn indexed_note_in_folder(note: &IndexedNote, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder) || note.folder_path.as_deref() == Some(folder)
+    note.folder.as_deref() == Some(folder)
+        || note.folder_path.as_deref() == Some(folder)
+        || note.account_path.as_deref() == Some(folder)
 }
 
 fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder) || note.folder_path.as_deref() == Some(folder)
+    note.folder.as_deref() == Some(folder)
+        || note.folder_path.as_deref() == Some(folder)
+        || note.account_path.as_deref() == Some(folder)
 }
 
 fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
@@ -1015,7 +1130,7 @@ fn parent_path_for_source(folders: &[FolderEntry], source: &FolderEntry) -> Opti
                 .find(|folder| folder.id == parent_id)
                 .map(|folder| folder.account_path.clone())
         })
-        .or_else(|| source.account.clone())
+        .or_else(|| Some(folder_account_label(source)))
 }
 
 fn resolve_target_parent(
@@ -1037,8 +1152,7 @@ fn resolve_target_parent(
     let accounts = folders
         .iter()
         .filter_map(|folder| {
-            let account = folder.account.as_ref()?;
-            let key = (account.clone(), folder.account_id);
+            let key = (folder_account_label(folder), folder.account_id);
             if seen_accounts.insert(key.clone()) {
                 Some(key)
             } else {
@@ -1128,6 +1242,15 @@ fn sibling_exists(
     })
 }
 
+fn folder_account_label(folder: &FolderEntry) -> String {
+    folder
+        .account
+        .clone()
+        .filter(|account| !account.trim().is_empty())
+        .or_else(|| folder.account_id.map(|id| format!("account:{id}")))
+        .unwrap_or_else(|| "unknown-account".to_owned())
+}
+
 fn apple_reference_now() -> f64 {
     const APPLE_REFERENCE_UNIX_EPOCH: f64 = 978_307_200.0;
     SystemTime::now()
@@ -1140,6 +1263,19 @@ fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(&needle.to_lowercase())
 }
 
+fn like_contains_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for ch in query.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
+}
+
 fn normalize_line_separators(text: &str) -> String {
     text.chars()
         .map(|ch| match ch {
@@ -1147,6 +1283,10 @@ fn normalize_line_separators(text: &str) -> String {
             _ => ch,
         })
         .collect()
+}
+
+pub(crate) fn is_coredata_note_id(note_id: &str) -> bool {
+    parse_coredata_note_db_id(note_id.trim()).is_some()
 }
 
 #[cfg(test)]
@@ -1169,8 +1309,13 @@ mod tests {
                 ZTITLE2 TEXT,
                 ZSNIPPET TEXT,
                 ZFOLDER INTEGER,
+                ZPARENT INTEGER,
+                ZACCOUNT8 INTEGER,
                 ZNOTEDATA INTEGER,
                 ZMODIFICATIONDATE1 REAL,
+                ZFOLDERMODIFICATIONDATE REAL,
+                ZPARENTMODIFICATIONDATE REAL,
+                Z_OPT INTEGER,
                 ZMARKEDFORDELETION INTEGER,
                 ZNAME TEXT,
                 ZUSERRECORDNAME TEXT,
@@ -1180,13 +1325,16 @@ mod tests {
                 Z_PK INTEGER PRIMARY KEY,
                 ZDATA BLOB
             );
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, ZTITLE2, ZMARKEDFORDELETION) VALUES (10, 15, 'Work', 0);
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, ZTITLE2, ZMARKEDFORDELETION) VALUES (11, 15, 'Personal', 0);
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, ZNAME, ZUSERRECORDNAME, ZMARKEDFORDELETION) VALUES (12, 13, 'iCloud', '_fixture', 0);
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
-                VALUES (1, 12, 'Stripe refund', 'Refund follow-up and receipt', 10, 101, 800000000, 0);
-            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
-                VALUES (2, 12, 'Garden list', 'Tomatoes and irrigation', 11, 102, 700000000, 0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, Z_OPT, ZTITLE2, ZPARENT, ZACCOUNT8, ZMARKEDFORDELETION)
+                VALUES (10, 15, 1, 'Work', NULL, 12, 0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, Z_OPT, ZTITLE2, ZPARENT, ZACCOUNT8, ZMARKEDFORDELETION)
+                VALUES (11, 15, 1, 'Personal', NULL, 12, 0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, Z_OPT, ZNAME, ZUSERRECORDNAME, ZMARKEDFORDELETION)
+                VALUES (12, 13, 1, 'iCloud', '_fixture', 0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (1, 12, 1, 'Stripe refund', 'Refund follow-up and receipt', 10, 101, 800000000, 0);
+            INSERT INTO ZICCLOUDSYNCINGOBJECT (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (2, 12, 1, 'Garden list', 'Tomatoes and irrigation', 11, 102, 700000000, 0);
             "#,
         )
         .unwrap();
@@ -1282,9 +1430,101 @@ mod tests {
 
         let hits = store.search("refund", None, 10).unwrap();
         assert_eq!(hits.len(), 1, "search should not duplicate notes");
+        assert_eq!(
+            hits[0].id, "x-coredata://FIXTURE-UUID/ICNote/p1",
+            "metadata UUID selection should be deterministic"
+        );
 
         let indexed = store.all_indexed_notes().unwrap();
         assert_eq!(indexed.len(), 2, "index should not duplicate notes");
+        assert_eq!(
+            indexed
+                .iter()
+                .find(|note| note.db_id == 1)
+                .map(|note| note.id.as_str()),
+            Some("x-coredata://FIXTURE-UUID/ICNote/p1")
+        );
+    }
+
+    #[test]
+    fn folder_move_apply_revalidates_duplicate_siblings() {
+        let mut store = fixture_store();
+        let plan = store.plan_folder_move("Work", "Renamed").unwrap();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE2, ZPARENT, ZACCOUNT8, ZMARKEDFORDELETION)
+                VALUES (20, 15, 1, 'Renamed', NULL, 12, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let err = store.apply_folder_move(&plan).unwrap_err();
+        assert!(err.to_string().contains("source or target changed"));
+        let title = store
+            .conn
+            .query_row(
+                "SELECT ZTITLE2 FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = 10",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Work");
+    }
+
+    #[test]
+    fn folder_move_apply_revalidates_descendant_target_parent() {
+        let mut store = fixture_store();
+        let plan = store.plan_folder_move("Work", "Personal/Work").unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE ZICCLOUDSYNCINGOBJECT SET ZPARENT = 10 WHERE Z_PK = 11",
+                [],
+            )
+            .unwrap();
+
+        let err = store.apply_folder_move(&plan).unwrap_err();
+        assert!(err.to_string().contains("source or target changed"));
+        let parent = store
+            .conn
+            .query_row(
+                "SELECT ZPARENT FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = 10",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None);
+    }
+
+    #[test]
+    fn note_move_apply_revalidates_target_path() {
+        let mut store = fixture_store();
+        let plan = store
+            .plan_note_move("x-coredata://FIXTURE-UUID/ICNote/p1", "Personal")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE ZICCLOUDSYNCINGOBJECT SET ZTITLE2 = 'Renamed' WHERE Z_PK = 11",
+                [],
+            )
+            .unwrap();
+
+        let err = store.apply_note_move(&plan).unwrap_err();
+        assert!(err.to_string().contains("source or target changed"));
+        let folder = store
+            .conn
+            .query_row(
+                "SELECT ZFOLDER FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(folder, 10);
     }
 
     /// Regression: a parent cycle in the folder table (e.g. corrupt iCloud

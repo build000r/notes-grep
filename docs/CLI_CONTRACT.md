@@ -44,12 +44,15 @@ Each cache record includes:
 - title
 - folder
 - folder_path
+- account_path
 - snippet
 - modified timestamp
 - decoded body text when a body blob is readable
 
 `--cache-dir DIR` redirects both indexing and warmed search for fixture tests and
-agent workflows.
+agent workflows. Warmed search reads a cache only when its manifest was written
+for the selected database path; otherwise it falls back to direct SQLite search
+against the selected database.
 
 ## Exit Codes
 
@@ -77,9 +80,10 @@ as `iCloud/Finance/Receipts` when disambiguation is needed.
 The command dry-runs by default and writes only with `--apply`. It rejects
 cross-account moves, cycles, and duplicate sibling names before writing.
 
-`ng search --folder` accepts either the legacy folder title or the nested
-`folder_path`. Warmed caches created before `folder_path` exists must be rebuilt
-with `ng index` before nested path filters can match cached results.
+`ng search --folder` accepts the legacy folder title, nested `folder_path`, or
+account-prefixed `account_path` printed by `ng folder list`. Warmed caches
+created before these path fields exist must be rebuilt with `ng index` before
+nested or account-prefixed filters can match cached results.
 
 ## Note Move Contract
 
