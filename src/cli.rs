@@ -5,11 +5,11 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Args, Parser, Subcommand};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::notes::{
     FolderEntry, FolderMovePlan, IndexedNote, NgError, NoteHit, NoteMovePlan, StoreStats,
-    default_db_path, open_store, open_store_for_writing, search_indexed_notes,
+    default_db_path, is_coredata_note_id, open_store, open_store_for_writing, search_indexed_notes,
 };
 
 #[derive(Debug, Parser)]
@@ -164,6 +164,17 @@ struct NoteMoveView {
     target_folder_path: String,
 }
 
+#[derive(Debug, Serialize)]
+struct OpenView {
+    status: &'static str,
+    note_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CacheManifest {
+    db: Option<String>,
+}
+
 pub fn run() -> Result<(), NgError> {
     let cli = Cli::parse();
     let db_path = cli.db.unwrap_or_else(default_db_path);
@@ -177,7 +188,7 @@ pub fn run() -> Result<(), NgError> {
         Some(CommandKind::Search(args)) => search(&db_path, cache_override, args, cli.json),
         Some(CommandKind::Folder { command }) => folder_command(&db_path, command, cli.json),
         Some(CommandKind::Note { command }) => note_command(&db_path, command, cli.json),
-        Some(CommandKind::Open(args)) => open_note(args),
+        Some(CommandKind::Open(args)) => open_note(args, cli.json),
     }
 }
 
@@ -311,7 +322,7 @@ fn search(
     json: bool,
 ) -> Result<(), NgError> {
     let cache_file = notes_cache_file(cache_override)?;
-    let hits = if cache_file.exists() {
+    let hits = if cache_file.exists() && cache_matches_db(&cache_file, db_path)? {
         let notes = read_indexed_notes(&cache_file)?;
         search_indexed_notes(&notes, &args.query, args.folder.as_deref(), args.limit)
     } else {
@@ -333,10 +344,25 @@ fn search(
     Ok(())
 }
 
-fn open_note(args: OpenArgs) -> Result<(), NgError> {
-    let status = Command::new("open").arg(args.note_id).status()?;
+fn open_note(args: OpenArgs, json: bool) -> Result<(), NgError> {
+    let note_id = args.note_id.trim();
+    if !is_coredata_note_id(note_id) {
+        return Err(NgError::Command(
+            "note ID must be an x-coredata://.../ICNote/p... ID".to_owned(),
+        ));
+    }
+
+    let status = Command::new("open").arg(note_id).status()?;
     if status.success() {
-        println!("open: ok");
+        let view = OpenView {
+            status: "ok",
+            note_id: note_id.to_owned(),
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&view)?);
+        } else {
+            println!("open: ok");
+        }
         Ok(())
     } else {
         Err(NgError::OpenFailed)
@@ -476,8 +502,9 @@ fn print_hits(hits: &[NoteHit]) {
     println!("hits: {}", hits.len());
     for hit in hits {
         let folder = hit
-            .folder_path
+            .account_path
             .as_deref()
+            .or(hit.folder_path.as_deref())
             .or(hit.folder.as_deref())
             .unwrap_or("-");
         let title = truncate(&hit.title, 72);
@@ -516,15 +543,51 @@ fn notes_cache_file(override_dir: Option<PathBuf>) -> Result<PathBuf, NgError> {
     Ok(cache_dir(override_dir)?.join("notes.jsonl"))
 }
 
+fn cache_matches_db(cache_file: &Path, db_path: &Path) -> Result<bool, NgError> {
+    let Some(cache_dir) = cache_file.parent() else {
+        return Ok(false);
+    };
+    let manifest = cache_dir.join("manifest.json");
+    if !manifest.exists() {
+        return Ok(false);
+    }
+
+    let manifest: CacheManifest = serde_json::from_slice(&fs::read(&manifest)?)?;
+    let Some(manifest_db) = manifest.db else {
+        return Ok(false);
+    };
+    Ok(paths_match(&manifest_db, db_path))
+}
+
+fn paths_match(left: &str, right: &Path) -> bool {
+    if Path::new(left) == right {
+        return true;
+    }
+
+    let Ok(left) = fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right) = fs::canonicalize(right) else {
+        return false;
+    };
+    left == right
+}
+
 fn read_indexed_notes(cache_file: &Path) -> Result<Vec<IndexedNote>, NgError> {
     let reader = BufReader::new(File::open(cache_file)?);
     let mut notes = Vec::new();
-    for line in reader.lines() {
+    for (line_index, line) in reader.lines().enumerate() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        notes.push(serde_json::from_str(&line)?);
+        let line_number = line_index + 1;
+        notes.push(serde_json::from_str(&line).map_err(|source| {
+            NgError::Command(format!(
+                "failed to read cache {} line {line_number}: {source}. Rebuild with ng index.",
+                cache_file.display()
+            ))
+        })?);
     }
     Ok(notes)
 }

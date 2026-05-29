@@ -3,6 +3,7 @@ lcov.info
 .DS_Store
 .claude/skills/
 .codex/skills/
+.ntm/
 
 # Python artifacts for repo-local skill helpers
 __pycache__/

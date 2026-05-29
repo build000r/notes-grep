@@ -166,6 +166,152 @@ fn search_json_uses_warmed_body_cache_with_folder_and_limit() {
 }
 
 #[test]
+fn search_does_not_use_cache_for_different_db() {
+    let (cache_temp, cached_db) = fixture_db();
+    let (_other_temp, other_db) = fixture_db();
+    let cache_dir = cache_temp.path().join("cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            cached_db.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "index",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            other_db.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "cache-only alpha",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stripe refund").not())
+        .stdout(predicate::str::contains("[]"));
+}
+
+#[test]
+fn malformed_cache_reports_line_and_reindex_hint() {
+    let (temp, path) = fixture_db();
+    let cache_dir = temp.path().join("bad-cache");
+    fs::create_dir_all(&cache_dir).expect("cache dir");
+    fs::write(cache_dir.join("notes.jsonl"), "{not-json}\n").expect("bad cache");
+    fs::write(
+        cache_dir.join("manifest.json"),
+        format!(
+            r#"{{"tool":"ng","db":"{}","cache_file":"{}","notes":1,"body_notes":0}}"#,
+            path.display(),
+            cache_dir.join("notes.jsonl").display()
+        ),
+    )
+    .expect("manifest");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "anything",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("line 1"))
+        .stderr(predicate::str::contains("Rebuild with ng index"));
+}
+
+#[test]
+fn search_folder_accepts_account_prefixed_paths() {
+    let (temp, path) = fixture_db();
+    let cache_dir = temp.path().join("cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--json",
+            "search",
+            "refund",
+            "--folder",
+            "iCloud/Finance",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains(
+            "\"account_path\": \"iCloud/Finance\"",
+        ));
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "index",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "cache-only alpha",
+            "--folder",
+            "iCloud/Finance",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains(
+            "\"account_path\": \"iCloud/Finance\"",
+        ));
+}
+
+#[test]
+fn search_treats_like_wildcards_as_literals() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "%",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stripe refund").not())
+        .stdout(predicate::str::contains("Garden list").not())
+        .stdout(predicate::str::contains("[]"));
+}
+
+#[test]
 fn folder_list_outputs_nested_account_paths() {
     let (_temp, path) = fixture_db();
     let mut cmd = Command::cargo_bin("ng").expect("ng binary");
@@ -175,6 +321,75 @@ fn folder_list_outputs_nested_account_paths() {
         .stdout(predicate::str::contains("iCloud/Finance"))
         .stdout(predicate::str::contains("iCloud/Finance/Receipts/Trips"))
         .stdout(predicate::str::contains("iCloud/Personal"));
+}
+
+#[test]
+fn folder_moves_preserve_fallback_account_labels() {
+    let (_temp, path) = fixture_db();
+    clear_account_name(&path);
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "folder",
+            "mv",
+            "Finance",
+            "Money",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("source: account:12/Finance"))
+        .stdout(predicate::str::contains("target: account:12/Money"));
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "folder",
+            "mv",
+            "Finance",
+            "account:12/Money",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("target: account:12/Money"));
+}
+
+#[test]
+fn moves_refuse_unknown_account_boundaries() {
+    let (_temp, path) = fixture_db();
+    clear_folder_account_ids(&path);
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "folder",
+            "mv",
+            "Finance",
+            "Money",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("folder account is unknown"));
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "note",
+            "mv",
+            "x-coredata://FIXTURE-UUID/ICNote/p1",
+            "Personal",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("folder account is unknown"));
 }
 
 #[test]
@@ -631,6 +846,106 @@ fn note_move_rebuild_index_updates_folder_filtered_body_search() {
         .stdout(predicate::str::contains("Stripe refund").not());
 }
 
+#[test]
+fn open_rejects_non_note_urls() {
+    let mut cmd = Command::cargo_bin("ng").expect("ng binary");
+    cmd.args(["open", "https://example.com"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("note ID must be an x-coredata://"));
+}
+
+#[test]
+fn open_json_outputs_structured_success() {
+    let temp = TempDir::new().expect("temp dir");
+    let fake_open = temp.path().join("open");
+    fs::write(&fake_open, "#!/bin/sh\nexit 0\n").expect("fake open");
+    let mut permissions = fs::metadata(&fake_open)
+        .expect("fake open metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_open, permissions).expect("fake open permissions");
+    }
+
+    let path = format!(
+        "{}:{}",
+        temp.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let mut cmd = Command::cargo_bin("ng").expect("ng binary");
+    cmd.env("PATH", path)
+        .args(["--json", "open", "x-coredata://FIXTURE-UUID/ICNote/p1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"ok\""))
+        .stdout(predicate::str::contains(
+            "\"note_id\": \"x-coredata://FIXTURE-UUID/ICNote/p1\"",
+        ));
+}
+
+#[test]
+fn exit_codes_match_public_contract() {
+    let missing_db = TempDir::new()
+        .expect("temp dir")
+        .path()
+        .join("missing.sqlite");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", missing_db.to_str().unwrap(), "doctor"])
+        .assert()
+        .code(2);
+
+    let schema_temp = TempDir::new().expect("temp dir");
+    let schema_db = schema_temp.path().join("schema.sqlite");
+    Connection::open(&schema_db).expect("schema db");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", schema_db.to_str().unwrap(), "doctor"])
+        .assert()
+        .code(3);
+
+    let (_temp, path) = fixture_db();
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "note",
+            "mv",
+            "bad-id",
+            "Finance",
+        ])
+        .assert()
+        .code(1);
+
+    let fake_open_dir = TempDir::new().expect("temp dir");
+    let fake_open = fake_open_dir.path().join("open");
+    fs::write(&fake_open, "#!/bin/sh\nexit 1\n").expect("fake open");
+    let mut permissions = fs::metadata(&fake_open)
+        .expect("fake open metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_open, permissions).expect("fake open permissions");
+    }
+    let path_env = format!(
+        "{}:{}",
+        fake_open_dir.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .env("PATH", path_env)
+        .args(["open", "x-coredata://FIXTURE-UUID/ICNote/p1"])
+        .assert()
+        .code(4);
+}
+
 fn add_second_account(path: &Path) {
     let conn = Connection::open(path).expect("fixture db");
     conn.execute_batch(
@@ -644,6 +959,28 @@ fn add_second_account(path: &Path) {
         "#,
     )
     .expect("second account");
+}
+
+fn clear_account_name(path: &Path) {
+    let conn = Connection::open(path).expect("fixture db");
+    let updated = conn
+        .execute(
+            "UPDATE ZICCLOUDSYNCINGOBJECT SET ZNAME = NULL WHERE Z_PK = 12",
+            [],
+        )
+        .expect("clear account name");
+    assert_eq!(updated, 1);
+}
+
+fn clear_folder_account_ids(path: &Path) {
+    let conn = Connection::open(path).expect("fixture db");
+    let updated = conn
+        .execute(
+            "UPDATE ZICCLOUDSYNCINGOBJECT SET ZACCOUNT8 = NULL WHERE ZTITLE2 IS NOT NULL",
+            [],
+        )
+        .expect("clear folder accounts");
+    assert_eq!(updated, 4);
 }
 
 fn assert_note_folder(path: &Path, note_pk: i64, expected_folder: i64) {
