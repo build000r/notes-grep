@@ -1,14 +1,22 @@
-use std::io::Read;
+use std::io::{self, Read};
 use std::str;
 
 use flate2::read::GzDecoder;
 
+const MAX_DECODED_BODY_BYTES: usize = 16 * 1024 * 1024;
 const MAX_RECURSION_DEPTH: usize = 8;
 const MAX_CANDIDATES: usize = 256;
 
 pub fn decode_note_body(blob: &[u8]) -> std::io::Result<Option<String>> {
     let mut decoded = Vec::new();
-    GzDecoder::new(blob).read_to_end(&mut decoded)?;
+    let mut decoder = GzDecoder::new(blob).take((MAX_DECODED_BODY_BYTES + 1) as u64);
+    decoder.read_to_end(&mut decoded)?;
+    if decoded.len() > MAX_DECODED_BODY_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "decoded note body exceeds size limit",
+        ));
+    }
     Ok(extract_protobuf_text(&decoded))
 }
 
@@ -181,6 +189,13 @@ mod tests {
         let blob = test_body_blob("first\u{2028}second\u{2029}third");
         let body = decode_note_body(&blob).unwrap().unwrap();
         assert_eq!(body, "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn rejects_oversized_decoded_body() {
+        let blob = gzip(&vec![b'a'; MAX_DECODED_BODY_BYTES + 1]);
+        let err = decode_note_body(&blob).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     fn test_body_blob(text: &str) -> Vec<u8> {
