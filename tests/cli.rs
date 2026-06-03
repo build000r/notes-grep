@@ -996,6 +996,64 @@ fn add_second_account(path: &Path) {
     .expect("second account");
 }
 
+/// Security regression: untrusted note content (title and decoded body that
+/// becomes a snippet) can contain ANSI/terminal escape sequences. The default
+/// human-readable `ng search` output must not emit raw control characters
+/// (e.g. ESC, U+001B) to the terminal, or a crafted note could hijack the
+/// user's terminal. JSON output is unaffected (serde_json escapes controls).
+#[test]
+fn search_human_output_neutralizes_terminal_escape_sequences() {
+    let (temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    // Title and snippet both carry an ESC-based ANSI sequence plus a bare CR.
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, ?1, ?2, 10, 850000000, 0)
+        "#,
+        params![
+            "Pwned \u{1b}[31mtitle\u{1b}[0m\rline",
+            "Refund \u{1b}[2Jcleared\u{1b}[0m snippet",
+        ],
+    )
+    .expect("escape note");
+    drop(conn);
+
+    let cache_dir = temp.path().join("empty-cache");
+    let mut cmd = Command::cargo_bin("ng").expect("ng binary");
+    let output = cmd
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    // The note must still surface (we did not drop the match), but no raw ESC
+    // (0x1b) or bare CR (0x0d) byte may reach the terminal.
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(
+        stdout.contains("title"),
+        "matching note should still appear: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw ESC must not reach the terminal: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "raw CR must not reach the terminal: {stdout:?}"
+    );
+}
+
 fn clear_account_name(path: &Path) {
     let conn = Connection::open(path).expect("fixture db");
     let updated = conn

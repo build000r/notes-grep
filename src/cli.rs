@@ -442,7 +442,7 @@ fn print_stats(stats: &StoreStats) {
 fn print_folders(folders: &[FolderEntry]) {
     println!("folders: {}", folders.len());
     for folder in folders {
-        println!("{}", folder.account_path);
+        println!("{}", sanitize_terminal(&folder.account_path));
     }
 }
 
@@ -460,8 +460,8 @@ fn folder_move_view(plan: &FolderMovePlan, applied: bool) -> FolderMoveView {
 
 fn print_folder_move(view: &FolderMoveView) {
     println!("folder-move: {}", view.status);
-    println!("source: {}", view.source);
-    println!("target: {}", view.target);
+    println!("source: {}", sanitize_terminal(&view.source));
+    println!("target: {}", sanitize_terminal(&view.target));
     println!("changed: {}", view.changed);
     println!("descendant-folders: {}", view.descendant_folders);
     println!("notes: {}", view.notes);
@@ -486,9 +486,18 @@ fn note_move_view(plan: &NoteMovePlan, applied: bool) -> NoteMoveView {
 fn print_note_move(view: &NoteMoveView) {
     println!("note-move: {}", view.status);
     println!("note-id: {}", view.note_id);
-    println!("title: {}", truncate(&view.note_title, 96));
-    println!("source-folder: {}", view.source_folder_path);
-    println!("target-folder: {}", view.target_folder_path);
+    println!(
+        "title: {}",
+        sanitize_terminal(&truncate(&view.note_title, 96))
+    );
+    println!(
+        "source-folder: {}",
+        sanitize_terminal(&view.source_folder_path)
+    );
+    println!(
+        "target-folder: {}",
+        sanitize_terminal(&view.target_folder_path)
+    );
     println!("changed: {}", view.changed);
     println!("applied: {}", view.applied);
     if !view.applied {
@@ -507,13 +516,48 @@ fn print_hits(hits: &[NoteHit]) {
             .or(hit.folder_path.as_deref())
             .or(hit.folder.as_deref())
             .unwrap_or("-");
-        let title = truncate(&hit.title, 72);
-        let snippet = truncate(hit.snippet.as_deref().unwrap_or(""), 96);
-        println!("{}  {}  {}", hit.id, folder, title);
+        let title = sanitize_terminal(&truncate(&hit.title, 72));
+        let snippet = sanitize_terminal(&truncate(hit.snippet.as_deref().unwrap_or(""), 96));
+        println!("{}  {}  {}", hit.id, sanitize_terminal(folder), title);
         if !snippet.is_empty() {
-            println!("  {}", snippet.replace('\n', " "));
+            println!("  {snippet}");
         }
     }
+}
+
+/// Render untrusted note/folder text inert for terminal display. Apple Notes
+/// titles, snippets, decoded body lines, and folder/account names are
+/// attacker-influenced (a shared or imported note can carry arbitrary bytes).
+/// Without this, an embedded ANSI/terminal escape (ESC = U+001B, bare CR, BS,
+/// etc.) would reach the user's terminal raw and could recolor or overwrite
+/// output, hide note IDs before an `ng note mv`/`ng open`, or trigger
+/// terminal-specific control-sequence behavior. C0/C1 control characters are
+/// replaced with a visible placeholder; ordinary whitespace runs (including
+/// newlines) collapse to a single space so a hit stays on its own line. The
+/// `--json` path is unaffected because serde_json already escapes U+0000-U+001F.
+fn sanitize_terminal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        // `char::is_control` covers C0 (U+0000-U+001F) and C1/DEL
+        // (U+007F-U+009F) control characters. Any that survived earlier
+        // decoding are replaced with a visible marker so the user can tell
+        // content was scrubbed rather than silently dropped.
+        if ch.is_control() {
+            out.push('\u{fffd}');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
