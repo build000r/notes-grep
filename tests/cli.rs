@@ -289,6 +289,41 @@ fn search_folder_accepts_account_prefixed_paths() {
 }
 
 #[test]
+fn search_sqlite_fallback_matches_unicode_case_insensitively() {
+    let (temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, 'Café résumé', 'naïve notes', 10, 750000000, 0)
+        "#,
+        [],
+    )
+    .expect("unicode note");
+    drop(conn);
+
+    // No warmed cache, so this exercises the direct SQLite fallback. SQLite
+    // `LIKE` only case-folds ASCII; an uppercase non-ASCII query must still
+    // match the lower-cased title/snippet, matching the warmed-cache path.
+    let cache_dir = temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "CAFÉ",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Café résumé\""));
+}
+
+#[test]
 fn search_treats_like_wildcards_as_literals() {
     let (_temp, path) = fixture_db();
     let cache_dir = _temp.path().join("empty-cache");

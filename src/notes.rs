@@ -199,11 +199,21 @@ impl NotesStore {
         limit: usize,
     ) -> Result<Vec<NoteHit>, NgError> {
         let limit = limit.clamp(1, 10_000);
-        let pattern = like_contains_pattern(query);
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if !query.is_empty() {
+        // SQLite `LIKE` only case-folds ASCII, so a `LIKE` pre-filter silently
+        // misses unicode case variants (searching "CAFÉ" would never surface a
+        // note containing "café"). The warmed-cache path matches with full
+        // unicode case folding via `contains_case_insensitive`, so the SQLite
+        // fallback must agree. For ASCII queries the `LIKE` filter is a correct
+        // superset of the case-insensitive match, so keep it (plus the SQL
+        // `LIMIT`) as a fast pre-filter. For non-ASCII queries the `LIKE` filter
+        // is not a superset, so drop it and the SQL `LIMIT`, then rely on the
+        // authoritative Rust filter below to match the warmed-cache semantics.
+        let like_prefilter = !query.is_empty() && query.is_ascii();
+        if like_prefilter {
+            let pattern = like_contains_pattern(query);
             sql.push_str(
                 " AND (note.ZTITLE1 LIKE ? ESCAPE '\\' OR COALESCE(note.ZSNIPPET, '') LIKE ? ESCAPE '\\')",
             );
@@ -211,7 +221,7 @@ impl NotesStore {
             params.push(Box::new(pattern));
         }
         sql.push_str(" ORDER BY note.ZMODIFICATIONDATE1 DESC");
-        if folder.is_none() {
+        if folder.is_none() && like_prefilter {
             sql.push_str(" LIMIT ?");
             params.push(Box::new(limit as i64));
         }
@@ -233,6 +243,7 @@ impl NotesStore {
         let hits = hits
             .into_iter()
             .map(|hit| hit.note)
+            .filter(|hit| note_hit_matches_query(hit, query))
             .filter(|hit| folder.is_none_or(|folder_name| note_hit_in_folder(hit, folder_name)))
             .take(limit)
             .collect();
@@ -895,6 +906,19 @@ fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
         || note.account_path.as_deref() == Some(folder)
 }
 
+/// Authoritative title/snippet match for the direct SQLite search path. This
+/// uses the same unicode-aware case folding as the warmed-cache path
+/// (`indexed_note_matches`) so both paths agree, regardless of whether SQLite's
+/// ASCII-only `LIKE` was used as a pre-filter.
+fn note_hit_matches_query(note: &NoteHit, query: &str) -> bool {
+    query.is_empty()
+        || contains_case_insensitive(&note.title, query)
+        || note
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+}
+
 fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
     if query.is_empty()
         || note
@@ -1364,6 +1388,41 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
         assert_eq!(hits[0].folder.as_deref(), Some("Work"));
+    }
+
+    #[test]
+    fn search_matches_unicode_case_insensitively() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'Café résumé', 'naïve notes', 10, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        // Upper-cased non-ASCII query. SQLite `LIKE` would never match the
+        // lower-cased "café"/"naïve"; the direct SQLite path must still find it.
+        let hits = store.search("CAFÉ", None, 10).unwrap();
+        assert_eq!(hits.len(), 1, "uppercase unicode query should match");
+        assert_eq!(hits[0].title, "Café résumé");
+
+        let hits = store.search("NAÏVE", None, 10).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "uppercase unicode snippet query should match"
+        );
+        assert_eq!(hits[0].title, "Café résumé");
+
+        // ASCII matching is unchanged.
+        let hits = store.search("REFUND", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Stripe refund");
     }
 
     #[test]
