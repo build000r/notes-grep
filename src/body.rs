@@ -198,6 +198,84 @@ mod tests {
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
+    #[test]
+    fn skips_varint_and_fixed_width_fields_before_text() {
+        // A realistic Notes protobuf interleaves the text field with non-text
+        // scalar fields. Exercise the wire-type skip arms (varint=0, fixed64=1,
+        // fixed32=5) and prove the parser still recovers the type-2 text field.
+        let mut message = Vec::new();
+        // field 1, wire type 0 (varint) = 300; wire type 0 contributes no tag bits
+        push_varint(&mut message, 1 << 3);
+        push_varint(&mut message, 300);
+        // field 2, wire type 1 (fixed64) = 8 bytes
+        push_varint(&mut message, (2 << 3) | 1);
+        message.extend_from_slice(&[0xAA; 8]);
+        // field 3, wire type 5 (fixed32) = 4 bytes
+        push_varint(&mut message, (3 << 3) | 5);
+        message.extend_from_slice(&[0xBB; 4]);
+        // field 4, wire type 2 (length-delimited) = the body text
+        push_len_field(&mut message, 4, b"Recovered body text after scalar fields");
+
+        let blob = gzip(&message);
+        let body = decode_note_body(&blob).unwrap().unwrap();
+        assert_eq!(body, "Recovered body text after scalar fields");
+    }
+
+    #[test]
+    fn truncated_length_delimited_field_does_not_over_read() {
+        // Declare a length-delimited field whose length runs past the buffer.
+        // The `end > message.len()` guard must stop parsing without panicking
+        // or reading out of bounds, yielding no text candidate.
+        let mut message = Vec::new();
+        push_varint(&mut message, (1 << 3) | 2); // field 1, wire type 2
+        push_varint(&mut message, 1_000); // claims 1000 bytes...
+        message.extend_from_slice(b"only a few"); // ...but far fewer follow
+
+        let blob = gzip(&message);
+        // Must not panic; no valid text candidate is produced.
+        let body = decode_note_body(&blob).unwrap();
+        assert_eq!(body, None);
+    }
+
+    #[test]
+    fn malformed_leading_key_terminates_without_text() {
+        // A continuation-only varint (high bit set, never terminating) at the
+        // start makes read_varint return None, hitting the early-return arm.
+        let message = vec![0x80, 0x80, 0x80];
+        let blob = gzip(&message);
+        let body = decode_note_body(&blob).unwrap();
+        assert_eq!(body, None);
+    }
+
+    #[test]
+    fn deeply_nested_message_terminates_without_runaway_recursion() {
+        // A crafted note body could nest length-delimited messages far deeper
+        // than any real note. The depth guard must keep collect_text_fields
+        // from recursing arbitrarily deep (which would risk a stack overflow);
+        // decoding must still terminate and return a value. We nest well past
+        // MAX_RECURSION_DEPTH around a long text leaf.
+        let mut payload = Vec::new();
+        push_len_field(
+            &mut payload,
+            1,
+            b"Deeply nested body text leaf used to drive recursion depth",
+        );
+        for _ in 0..(MAX_RECURSION_DEPTH * 4) {
+            let mut wrapped = Vec::new();
+            push_len_field(&mut wrapped, 1, &payload);
+            payload = wrapped;
+        }
+
+        let blob = gzip(&payload);
+        // The contract under test is termination + no panic on adversarial
+        // nesting, not which candidate wins. Decoding must succeed.
+        let body = decode_note_body(&blob).unwrap();
+        assert!(
+            body.is_some(),
+            "decoding deeply nested input must terminate"
+        );
+    }
+
     fn test_body_blob(text: &str) -> Vec<u8> {
         let mut message = Vec::new();
         push_len_field(&mut message, 1, text.as_bytes());
