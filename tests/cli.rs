@@ -103,6 +103,37 @@ fn doctor_reports_fixture_counts() {
 }
 
 #[test]
+fn home_human_output_reports_ready_status_and_next_commands() {
+    let (_temp, path) = fixture_db();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ng: ready"))
+        .stdout(predicate::str::contains("next: ng doctor"))
+        .stdout(predicate::str::contains("ng note mv NOTE_ID FOLDER"));
+}
+
+#[test]
+fn home_json_output_reports_missing_database_without_error() {
+    let missing_db = TempDir::new()
+        .expect("temp dir")
+        .path()
+        .join("missing.sqlite");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", missing_db.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"missing-notes-db\""))
+        .stdout(predicate::str::contains("\"commands\""))
+        .stdout(predicate::str::contains("ng doctor"));
+}
+
+#[test]
 fn index_writes_full_body_cache_records() {
     let (temp, path) = fixture_db();
     let cache_dir = temp.path().join("cache");
