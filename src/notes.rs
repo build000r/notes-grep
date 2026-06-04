@@ -199,6 +199,7 @@ impl NotesStore {
         limit: usize,
     ) -> Result<Vec<NoteHit>, NgError> {
         let limit = limit.clamp(1, 10_000);
+        let query_lowercase = query.to_lowercase();
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -243,7 +244,7 @@ impl NotesStore {
         let hits = hits
             .into_iter()
             .map(|hit| hit.note)
-            .filter(|hit| note_hit_matches_query(hit, query))
+            .filter(|hit| note_hit_matches_query(hit, &query_lowercase))
             .filter(|hit| folder.is_none_or(|folder_name| note_hit_in_folder(hit, folder_name)))
             .take(limit)
             .collect();
@@ -755,17 +756,18 @@ pub fn search_indexed_notes(
     limit: usize,
 ) -> Vec<NoteHit> {
     let limit = limit.clamp(1, 10_000);
+    let query_lowercase = query.to_lowercase();
     notes
         .iter()
         .filter(|note| folder.is_none_or(|folder_name| indexed_note_in_folder(note, folder_name)))
-        .filter(|note| indexed_note_matches(note, query))
+        .filter(|note| indexed_note_matches(note, &query_lowercase))
         .take(limit)
-        .map(|note| note.to_hit(query))
+        .map(|note| note.to_hit(&query_lowercase))
         .collect()
 }
 
 impl IndexedNote {
-    fn to_hit(&self, query: &str) -> NoteHit {
+    fn to_hit(&self, query_lowercase: &str) -> NoteHit {
         NoteHit {
             id: self.id.clone(),
             db_id: self.db_id,
@@ -773,7 +775,7 @@ impl IndexedNote {
             folder: self.folder.clone(),
             folder_path: self.folder_path.clone(),
             account_path: self.account_path.clone(),
-            snippet: best_snippet(self, query),
+            snippet: best_snippet(self, query_lowercase),
             modified: self.modified.clone(),
         }
     }
@@ -881,17 +883,17 @@ fn normalized_optional_string(
     Ok(value.map(|text| normalize_line_separators(&text)))
 }
 
-fn indexed_note_matches(note: &IndexedNote, query: &str) -> bool {
-    query.is_empty()
-        || contains_case_insensitive(&note.title, query)
+fn indexed_note_matches(note: &IndexedNote, query_lowercase: &str) -> bool {
+    query_lowercase.is_empty()
+        || contains_case_insensitive(&note.title, query_lowercase)
         || note
             .snippet
             .as_deref()
-            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
         || note
             .body
             .as_deref()
-            .is_some_and(|body| contains_case_insensitive(body, query))
+            .is_some_and(|body| contains_case_insensitive(body, query_lowercase))
 }
 
 fn indexed_note_in_folder(note: &IndexedNote, folder: &str) -> bool {
@@ -910,21 +912,21 @@ fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
 /// uses the same unicode-aware case folding as the warmed-cache path
 /// (`indexed_note_matches`) so both paths agree, regardless of whether SQLite's
 /// ASCII-only `LIKE` was used as a pre-filter.
-fn note_hit_matches_query(note: &NoteHit, query: &str) -> bool {
-    query.is_empty()
-        || contains_case_insensitive(&note.title, query)
+fn note_hit_matches_query(note: &NoteHit, query_lowercase: &str) -> bool {
+    query_lowercase.is_empty()
+        || contains_case_insensitive(&note.title, query_lowercase)
         || note
             .snippet
             .as_deref()
-            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
 }
 
-fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
-    if query.is_empty()
+fn best_snippet(note: &IndexedNote, query_lowercase: &str) -> Option<String> {
+    if query_lowercase.is_empty()
         || note
             .snippet
             .as_deref()
-            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
     {
         return note.snippet.clone();
     }
@@ -933,7 +935,7 @@ fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
         .as_deref()
         .and_then(|body| {
             body.lines()
-                .find(|line| contains_case_insensitive(line, query))
+                .find(|line| contains_case_insensitive(line, query_lowercase))
         })
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -992,11 +994,7 @@ fn build_folder_entries(raw: &HashMap<i64, RawFolder>) -> Vec<FolderEntry> {
             }
         })
         .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        left.account_path
-            .to_lowercase()
-            .cmp(&right.account_path.to_lowercase())
-    });
+    entries.sort_by_cached_key(|entry| entry.account_path.to_lowercase());
     entries
 }
 
@@ -1283,8 +1281,8 @@ fn apple_reference_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
+fn contains_case_insensitive(haystack: &str, needle_lowercase: &str) -> bool {
+    haystack.to_lowercase().contains(needle_lowercase)
 }
 
 fn like_contains_pattern(query: &str) -> String {
@@ -1473,6 +1471,81 @@ mod tests {
                 .unwrap_or_default()
                 .contains("body-only alpha phrase")
         );
+    }
+
+    #[test]
+    fn search_indexed_notes_matches_unicode_body_case_insensitively() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'Body note', 'plain metadata', 10, 103, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO ZICNOTEDATA (Z_PK, ZDATA) VALUES (?, ?)",
+                (103, fixture_body_blob("body-only café résumé phrase")),
+            )
+            .unwrap();
+
+        let notes = store.all_indexed_notes().unwrap();
+        let hits = search_indexed_notes(&notes, "CAFÉ", None, 10);
+        assert_eq!(hits.len(), 1, "uppercase unicode query should match body");
+        assert_eq!(hits[0].title, "Body note");
+        assert_eq!(
+            hits[0].snippet.as_deref(),
+            Some("body-only café résumé phrase")
+        );
+    }
+
+    #[test]
+    fn build_folder_entries_sorts_case_insensitively_by_account_path() {
+        let raw = HashMap::from([
+            (
+                1,
+                RawFolder {
+                    id: 1,
+                    name: "beta".into(),
+                    parent_id: None,
+                    account_id: Some(99),
+                    account: Some("iCloud".into()),
+                },
+            ),
+            (
+                2,
+                RawFolder {
+                    id: 2,
+                    name: "Alpha".into(),
+                    parent_id: None,
+                    account_id: Some(99),
+                    account: Some("iCloud".into()),
+                },
+            ),
+            (
+                3,
+                RawFolder {
+                    id: 3,
+                    name: "zeta".into(),
+                    parent_id: None,
+                    account_id: Some(12),
+                    account: Some("Local".into()),
+                },
+            ),
+        ]);
+
+        let paths = build_folder_entries(&raw)
+            .into_iter()
+            .map(|entry| entry.account_path)
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["iCloud/Alpha", "iCloud/beta", "Local/zeta"]);
     }
 
     /// Regression: an earlier `LEFT JOIN Z_METADATA AS zmd ON 1=1` produced
