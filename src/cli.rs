@@ -193,16 +193,9 @@ pub fn run() -> Result<(), NgError> {
 }
 
 fn print_home(db_path: &Path, json: bool) -> Result<(), NgError> {
-    let status = match open_store(db_path).and_then(|store| store.stats()) {
-        Ok(_) => "ready",
-        Err(NgError::DatabaseMissing(_)) => "missing-notes-db",
-        Err(NgError::DatabaseOpen { .. }) => "needs-full-disk-access",
-        Err(NgError::Schema(_)) => "unrecognized-notes-schema",
-        Err(_) => "needs-attention",
-    };
     let view = HomeView {
         tool: "ng",
-        status,
+        status: home_status(db_path),
         db: db_path.display().to_string(),
         commands: vec![
             "ng doctor",
@@ -222,6 +215,16 @@ fn print_home(db_path: &Path, json: bool) -> Result<(), NgError> {
         println!("next: {}", view.commands.join(" | "));
     }
     Ok(())
+}
+
+fn home_status(db_path: &Path) -> &'static str {
+    match open_store(db_path).and_then(|store| store.stats()) {
+        Ok(_) => "ready",
+        Err(NgError::DatabaseMissing(_)) => "missing-notes-db",
+        Err(NgError::DatabaseOpen { .. }) => "needs-full-disk-access",
+        Err(NgError::Schema(_)) => "unrecognized-notes-schema",
+        Err(_) => "needs-attention",
+    }
 }
 
 fn doctor(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
