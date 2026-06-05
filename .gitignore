@@ -2,7 +2,7 @@
 lcov.info
 .DS_Store
 .claude/skills/
-.codex/skills/
+.codex/
 .ntm/
 
 # Python artifacts for repo-local skill helpers
@@ -13,7 +13,9 @@ __pycache__/
 *.skill
 dist/
 
-# beads local database
-.beads/*.db
-.beads/*.db-shm
-.beads/*.db-wal
+# Local agent/tooling state — not part of the public crate
+.beads/
+.mcp.json
+
+# bv (beads viewer) local config and caches
+.bv/
