@@ -488,7 +488,7 @@ fn note_move_view(plan: &NoteMovePlan, applied: bool) -> NoteMoveView {
 
 fn print_note_move(view: &NoteMoveView) {
     println!("note-move: {}", view.status);
-    println!("note-id: {}", view.note_id);
+    println!("note-id: {}", sanitize_terminal(&view.note_id));
     println!(
         "title: {}",
         sanitize_terminal(&truncate(&view.note_title, 96))
@@ -519,9 +519,10 @@ fn print_hits(hits: &[NoteHit]) {
             .or(hit.folder_path.as_deref())
             .or(hit.folder.as_deref())
             .unwrap_or("-");
+        let id = sanitize_terminal(&hit.id);
         let title = sanitize_terminal(&truncate(&hit.title, 72));
         let snippet = sanitize_terminal(&truncate(hit.snippet.as_deref().unwrap_or(""), 96));
-        println!("{}  {}  {}", hit.id, sanitize_terminal(folder), title);
+        println!("{}  {}  {}", id, sanitize_terminal(folder), title);
         if !snippet.is_empty() {
             println!("  {snippet}");
         }

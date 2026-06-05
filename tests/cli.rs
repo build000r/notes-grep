@@ -611,6 +611,43 @@ fn note_move_dry_run_json_does_not_write() {
 }
 
 #[test]
+fn note_move_human_output_neutralizes_note_id_escape_sequences() {
+    let (_temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        "UPDATE Z_METADATA SET Z_UUID = ?1",
+        params!["FIXTURE-\u{1b}[35mUUID"],
+    )
+    .expect("escape metadata UUID");
+    drop(conn);
+
+    let escaped_note_id = "x-coredata://FIXTURE-\u{1b}[35mUUID/ICNote/p1";
+    let output = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "note",
+            "mv",
+            escaped_note_id,
+            "Personal",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(stdout.contains("note-move: dry-run"));
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw ESC must not reach the terminal: {stdout:?}"
+    );
+    assert_note_folder(&path, 1, 10);
+}
+
+#[test]
 fn note_move_apply_moves_one_note_without_mutating_note_content() {
     let (_temp, path) = fixture_db();
 
@@ -1036,6 +1073,11 @@ fn add_second_account(path: &Path) {
 fn search_human_output_neutralizes_terminal_escape_sequences() {
     let (temp, path) = fixture_db();
     let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        "UPDATE Z_METADATA SET Z_UUID = ?1",
+        params!["FIXTURE-\u{1b}[35mUUID"],
+    )
+    .expect("escape metadata UUID");
     // Title and snippet both carry an ESC-based ANSI sequence plus a bare CR.
     conn.execute(
         r#"
