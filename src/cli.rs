@@ -89,6 +89,15 @@ struct SearchArgs {
 
     #[arg(long, short = 'e')]
     regex: bool,
+
+    #[arg(long, short = 'c')]
+    count: bool,
+
+    #[arg(long, short = 'l')]
+    id_only: bool,
+
+    #[arg(long, short = 'q')]
+    quiet: bool,
 }
 
 #[derive(Debug, Args)]
@@ -354,7 +363,21 @@ fn search(
         )?
     };
 
-    if json {
+    if args.quiet {
+        return if hits.is_empty() {
+            Err(NgError::NoMatch)
+        } else {
+            Ok(())
+        };
+    }
+
+    if args.count {
+        println!("{}", hits.len());
+    } else if args.id_only {
+        for hit in &hits {
+            println!("{}", hit.id);
+        }
+    } else if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
         print_hits(&hits);

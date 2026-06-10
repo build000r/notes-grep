@@ -1243,6 +1243,114 @@ fn search_regex_rejects_invalid_pattern() {
         .stderr(predicate::str::contains("invalid regex"));
 }
 
+#[test]
+fn search_count_prints_bare_integer() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "and",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("1\n"));
+}
+
+#[test]
+fn search_count_zero_for_no_matches() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "nonexistent-query-xyzzy",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("0\n"));
+}
+
+#[test]
+fn search_id_only_prints_one_id_per_line() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let output = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--id-only",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("x-coredata://"));
+}
+
+#[test]
+fn search_quiet_exits_zero_on_match() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--quiet",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn search_quiet_exits_nonzero_on_no_match() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--quiet",
+            "nonexistent-query-xyzzy",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+}
+
 fn body_blob(text: &str) -> Vec<u8> {
     let mut message = Vec::new();
     push_len_field(&mut message, 1, text.as_bytes());

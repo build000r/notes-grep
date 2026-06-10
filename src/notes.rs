@@ -28,6 +28,8 @@ pub enum NgError {
     NoDataDir,
     #[error("failed to open note")]
     OpenFailed,
+    #[error("")]
+    NoMatch,
     #[error("{0}")]
     Command(String),
     #[error(transparent)]
@@ -45,6 +47,7 @@ impl NgError {
             Self::DatabaseMissing(_) | Self::DatabaseOpen { .. } => 2,
             Self::Schema(_) => 3,
             Self::OpenFailed => 4,
+            Self::NoMatch => 1,
             Self::NoDataDir | Self::Command(_) | Self::Sqlite(_) | Self::Io(_) | Self::Json(_) => 1,
         }
     }
