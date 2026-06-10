@@ -1314,6 +1314,15 @@ fn apple_reference_now() -> f64 {
 }
 
 fn contains_case_insensitive(haystack: &str, needle_lowercase: &str) -> bool {
+    if haystack.len() < needle_lowercase.len() {
+        return false;
+    }
+    if haystack.is_ascii() && needle_lowercase.is_ascii() {
+        return haystack
+            .as_bytes()
+            .windows(needle_lowercase.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_lowercase.as_bytes()));
+    }
     haystack.to_lowercase().contains(needle_lowercase)
 }
 
