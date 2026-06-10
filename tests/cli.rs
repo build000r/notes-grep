@@ -1351,6 +1351,42 @@ fn search_quiet_exits_nonzero_on_no_match() {
         .stderr(predicate::str::is_empty());
 }
 
+#[test]
+fn search_folder_matches_subtree() {
+    let (_temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, 'Trip receipt', 'Airline ticket', 21, 750000000, 0)
+        "#,
+        [],
+    )
+    .expect("subtree note");
+    drop(conn);
+
+    let cache_dir = _temp.path().join("empty-cache");
+    // --folder Finance should find notes in Finance AND Finance/Receipts/Trips
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--folder",
+            "iCloud/Finance",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("\"title\": \"Trip receipt\""));
+}
+
 fn body_blob(text: &str) -> Vec<u8> {
     let mut message = Vec::new();
     push_len_field(&mut message, 1, text.as_bytes());

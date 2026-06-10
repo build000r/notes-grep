@@ -925,15 +925,19 @@ fn note_hit_matches_regex(note: &NoteHit, re: &regex::Regex) -> bool {
 }
 
 fn indexed_note_in_folder(note: &IndexedNote, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder)
-        || note.folder_path.as_deref() == Some(folder)
-        || note.account_path.as_deref() == Some(folder)
+    folder_matches(note.folder.as_deref(), folder)
+        || folder_matches(note.folder_path.as_deref(), folder)
+        || folder_matches(note.account_path.as_deref(), folder)
 }
 
 fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder)
-        || note.folder_path.as_deref() == Some(folder)
-        || note.account_path.as_deref() == Some(folder)
+    folder_matches(note.folder.as_deref(), folder)
+        || folder_matches(note.folder_path.as_deref(), folder)
+        || folder_matches(note.account_path.as_deref(), folder)
+}
+
+fn folder_matches(note_folder: Option<&str>, filter: &str) -> bool {
+    note_folder.is_some_and(|path| path == filter || path.starts_with(&format!("{filter}/")))
 }
 
 /// Authoritative title/snippet match for the direct SQLite search path. This
