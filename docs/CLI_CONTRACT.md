@@ -23,6 +23,10 @@ open a note, then decide whether to refine the query.
 | `ng stats` | Print basic note/folder/account counts. |
 | `ng index` | Write a JSONL full-body cache under the local data directory. |
 | `ng search QUERY` | Return warmed cache matches, falling back to title/snippet SQLite search when no cache exists. |
+| `ng search QUERY --regex` | Interpret the query as a case-insensitive regular expression. |
+| `ng search QUERY --count` | Print only the number of matching notes. |
+| `ng search QUERY --id-only` | Print one stable note ID per line, no other output. |
+| `ng search QUERY --quiet` | Suppress output; exit 0 if any match, exit 1 if none. |
 | `ng search QUERY --json` | Return stable JSON for agents. |
 | `ng folder list` | Return account-prefixed nested folder paths. |
 | `ng folder mv SOURCE TARGET` | Dry-run a same-account folder rename or nested move. |
@@ -59,7 +63,7 @@ against the selected database.
 | Code | Meaning |
 |---:|---|
 | 0 | Success. |
-| 1 | Generic local IO/serialization failure. |
+| 1 | No matches found (`--quiet`), or generic local IO/serialization failure. |
 | 2 | Missing/inaccessible Notes database. |
 | 3 | Unrecognized Notes database schema. |
 | 4 | Failed to open note URL. |
@@ -81,9 +85,10 @@ The command dry-runs by default and writes only with `--apply`. It rejects
 cross-account moves, cycles, and duplicate sibling names before writing.
 
 `ng search --folder` accepts the legacy folder title, nested `folder_path`, or
-account-prefixed `account_path` printed by `ng folder list`. Warmed caches
-created before these path fields exist must be rebuilt with `ng index` before
-nested or account-prefixed filters can match cached results.
+account-prefixed `account_path` printed by `ng folder list`. The filter matches
+notes in the named folder and all its subfolders. Warmed caches created before
+these path fields exist must be rebuilt with `ng index` before nested or
+account-prefixed filters can match cached results.
 
 ## Note Move Contract
 
@@ -127,3 +132,15 @@ Applied moves do not update existing warmed cache files in place. Rebuild with
 - No semantic search.
 - No Tantivy or semantic index until the JSONL body cache is trusted.
 - No dependency on `xf` or `frankensearch` source.
+
+## Search Flags Reference
+
+| Flag | Short | Effect |
+|---|---|---|
+| `--regex` | `-e` | Interpret query as a case-insensitive regex. |
+| `--folder FOLDER` | `-f` | Filter to notes in FOLDER and its subfolders. |
+| `--limit N` | `-n` | Cap results (default 20). |
+| `--count` | `-c` | Print only the match count. |
+| `--id-only` | `-l` | Print one `x-coredata://` ID per line. |
+| `--quiet` | `-q` | Suppress output; exit 0 on match, 1 on no match. |
+| `--json` | — | Structured JSON output (global flag). |

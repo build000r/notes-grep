@@ -13,7 +13,22 @@ commands recorded for `notes-grep-hw0`.
 
 | Version | Date | State | Evidence |
 |---|---:|---|---|
+| 0.2.0 | 2026-06-10 | In development | Search ergonomics: regex, count, id-only, quiet, recursive folder filter |
 | 0.1.0 | 2026-05-12 | Release candidate; tag `v0.1.0` will be created after validation | Cargo package metadata and validation ladder |
+
+## 0.2.0 - 2026-06-10
+
+### Delivered capability: rg-style search ergonomics
+
+- Added `--regex/-e` for case-insensitive regex search across title, snippet,
+  and body text (warmed cache and SQLite fallback paths).
+- Added `--count/-c` to print only the match count.
+- Added `--id-only/-l` to print one stable `x-coredata://` note ID per line.
+- Added `--quiet/-q` to suppress output and signal matches via exit code (0 on
+  match, 1 on no match), matching `grep`/`rg` conventions.
+- Changed `--folder` to match notes in the named folder and all its subfolders.
+- Optimized case-insensitive matching with an ASCII fast path that avoids
+  per-note allocation.
 
 ## 0.1.0 - 2026-05-12
 
