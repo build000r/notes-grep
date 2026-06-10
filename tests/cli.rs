@@ -1352,6 +1352,76 @@ fn search_quiet_exits_nonzero_on_no_match() {
 }
 
 #[test]
+fn search_after_filters_by_modification_date() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    // Note 1 modified at Apple ref 800000000 -> 2026-05-09
+    // Note 2 modified at Apple ref 700000000 -> 2023-03-08
+    // --after 2025-01-01 should return only note 1
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--after",
+            "2025-01-01",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("Garden list").not());
+}
+
+#[test]
+fn search_before_filters_by_modification_date() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    // --before 2025-01-01 should return only note 2
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--before",
+            "2025-01-01",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_date_filter_rejects_invalid_date() {
+    let (_temp, path) = fixture_db();
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "search",
+            "",
+            "--after",
+            "not-a-date",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid date"));
+}
+
+#[test]
 fn search_folder_matches_subtree() {
     let (_temp, path) = fixture_db();
     let conn = Connection::open(&path).expect("fixture db");

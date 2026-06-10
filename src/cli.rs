@@ -98,6 +98,12 @@ struct SearchArgs {
 
     #[arg(long, short = 'q')]
     quiet: bool,
+
+    #[arg(long, value_name = "DATE")]
+    after: Option<String>,
+
+    #[arg(long, value_name = "DATE")]
+    before: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -362,6 +368,8 @@ fn search(
             args.limit,
         )?
     };
+
+    let hits = filter_by_date(hits, args.after.as_deref(), args.before.as_deref())?;
 
     if args.quiet {
         return if hits.is_empty() {
@@ -691,6 +699,57 @@ fn with_tmp_suffix(path: &Path) -> PathBuf {
         .unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
+}
+
+fn filter_by_date(
+    hits: Vec<NoteHit>,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> Result<Vec<NoteHit>, NgError> {
+    if after.is_none() && before.is_none() {
+        return Ok(hits);
+    }
+    let after = after.map(normalize_date_arg).transpose()?;
+    let before = before.map(normalize_date_arg).transpose()?;
+    Ok(hits
+        .into_iter()
+        .filter(|hit| {
+            let Some(modified) = hit.modified.as_deref() else {
+                return false;
+            };
+            if let Some(ref after) = after {
+                if modified < after.as_str() {
+                    return false;
+                }
+            }
+            if let Some(ref before) = before {
+                if modified >= before.as_str() {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect())
+}
+
+fn normalize_date_arg(date: &str) -> Result<String, NgError> {
+    let trimmed = date.trim();
+    if trimmed.len() == 10
+        && trimmed.as_bytes().get(4) == Some(&b'-')
+        && trimmed.as_bytes().get(7) == Some(&b'-')
+        && trimmed.bytes().filter(|b| b.is_ascii_digit()).count() == 8
+    {
+        return Ok(format!("{trimmed} 00:00:00"));
+    }
+    if trimmed.len() == 19
+        && trimmed.as_bytes().get(10) == Some(&b' ')
+        && trimmed.as_bytes().get(13) == Some(&b':')
+    {
+        return Ok(trimmed.to_owned());
+    }
+    Err(NgError::Command(format!(
+        "invalid date: '{trimmed}'. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS."
+    )))
 }
 
 fn compile_regex(pattern: &str) -> Result<Regex, NgError> {
