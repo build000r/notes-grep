@@ -110,6 +110,9 @@ struct SearchArgs {
 
     #[arg(long)]
     no_snippet: bool,
+
+    #[arg(long, short = 'v')]
+    invert_match: bool,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -370,6 +373,7 @@ fn search(
             matcher.as_ref(),
             args.folder.as_deref(),
             args.limit,
+            args.invert_match,
         )
     } else {
         let store = open_store(db_path)?;
@@ -378,6 +382,7 @@ fn search(
             matcher.as_ref(),
             args.folder.as_deref(),
             args.limit,
+            args.invert_match,
         )?
     };
 

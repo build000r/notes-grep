@@ -205,22 +205,14 @@ impl NotesStore {
         regex: Option<&regex::Regex>,
         folder: Option<&str>,
         limit: usize,
+        invert: bool,
     ) -> Result<Vec<NoteHit>, NgError> {
         let limit = limit.clamp(1, 10_000);
         let query_lowercase = query.to_lowercase();
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        // SQLite `LIKE` only case-folds ASCII, so a `LIKE` pre-filter silently
-        // misses unicode case variants (searching "CAFÉ" would never surface a
-        // note containing "café"). The warmed-cache path matches with full
-        // unicode case folding via `contains_case_insensitive`, so the SQLite
-        // fallback must agree. For ASCII queries the `LIKE` filter is a correct
-        // superset of the case-insensitive match, so keep it (plus the SQL
-        // `LIMIT`) as a fast pre-filter. For non-ASCII queries the `LIKE` filter
-        // is not a superset, so drop it and the SQL `LIMIT`, then rely on the
-        // authoritative Rust filter below to match the warmed-cache semantics.
-        let like_prefilter = regex.is_none() && !query.is_empty() && query.is_ascii();
+        let like_prefilter = !invert && regex.is_none() && !query.is_empty() && query.is_ascii();
         if like_prefilter {
             let pattern = like_contains_pattern(query);
             sql.push_str(
@@ -252,9 +244,12 @@ impl NotesStore {
         let hits = hits
             .into_iter()
             .map(|hit| hit.note)
-            .filter(|hit| match regex {
-                Some(re) => note_hit_matches_regex(hit, re),
-                None => note_hit_matches_query(hit, &query_lowercase),
+            .filter(|hit| {
+                let matches = match regex {
+                    Some(re) => note_hit_matches_regex(hit, re),
+                    None => note_hit_matches_query(hit, &query_lowercase),
+                };
+                matches != invert
             })
             .filter(|hit| folder.is_none_or(|folder_name| note_hit_in_folder(hit, folder_name)))
             .take(limit)
@@ -766,15 +761,19 @@ pub fn search_indexed_notes(
     regex: Option<&regex::Regex>,
     folder: Option<&str>,
     limit: usize,
+    invert: bool,
 ) -> Vec<NoteHit> {
     let limit = limit.clamp(1, 10_000);
     let query_lowercase = query.to_lowercase();
     notes
         .iter()
         .filter(|note| folder.is_none_or(|folder_name| indexed_note_in_folder(note, folder_name)))
-        .filter(|note| match regex {
-            Some(re) => indexed_note_matches_regex(note, re),
-            None => indexed_note_matches(note, &query_lowercase),
+        .filter(|note| {
+            let matches = match regex {
+                Some(re) => indexed_note_matches_regex(note, re),
+                None => indexed_note_matches(note, &query_lowercase),
+            };
+            matches != invert
         })
         .take(limit)
         .map(|note| note.to_hit(&query_lowercase))
@@ -1130,7 +1129,7 @@ mod tests {
     #[test]
     fn search_matches_title_and_snippet() {
         let store = fixture_store();
-        let hits = store.search("refund", None, None, 10).unwrap();
+        let hits = store.search("refund", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
         assert_eq!(hits[0].folder.as_deref(), Some("Work"));
@@ -1153,11 +1152,11 @@ mod tests {
 
         // Upper-cased non-ASCII query. SQLite `LIKE` would never match the
         // lower-cased "café"/"naïve"; the direct SQLite path must still find it.
-        let hits = store.search("CAFÉ", None, None, 10).unwrap();
+        let hits = store.search("CAFÉ", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1, "uppercase unicode query should match");
         assert_eq!(hits[0].title, "Café résumé");
 
-        let hits = store.search("NAÏVE", None, None, 10).unwrap();
+        let hits = store.search("NAÏVE", None, None, 10, false).unwrap();
         assert_eq!(
             hits.len(),
             1,
@@ -1166,7 +1165,7 @@ mod tests {
         assert_eq!(hits[0].title, "Café résumé");
 
         // ASCII matching is unchanged.
-        let hits = store.search("REFUND", None, None, 10).unwrap();
+        let hits = store.search("REFUND", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
     }
@@ -1174,7 +1173,9 @@ mod tests {
     #[test]
     fn search_filters_folder() {
         let store = fixture_store();
-        let hits = store.search("and", None, Some("Personal"), 10).unwrap();
+        let hits = store
+            .search("and", None, Some("Personal"), 10, false)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Garden list");
     }
@@ -1209,7 +1210,7 @@ mod tests {
     fn search_indexed_notes_matches_body_and_filters_folder() {
         let store = fixture_store();
         let notes = store.all_indexed_notes().unwrap();
-        let hits = search_indexed_notes(&notes, "body-only", None, Some("Work"), 10);
+        let hits = search_indexed_notes(&notes, "body-only", None, Some("Work"), 10, false);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
         assert!(
@@ -1244,7 +1245,7 @@ mod tests {
             .unwrap();
 
         let notes = store.all_indexed_notes().unwrap();
-        let hits = search_indexed_notes(&notes, "CAFÉ", None, None, 10);
+        let hits = search_indexed_notes(&notes, "CAFÉ", None, None, 10, false);
         assert_eq!(hits.len(), 1, "uppercase unicode query should match body");
         assert_eq!(hits[0].title, "Body note");
         assert_eq!(
@@ -1265,7 +1266,7 @@ mod tests {
             .execute("INSERT INTO Z_METADATA (Z_UUID) VALUES ('SECOND-UUID')", [])
             .unwrap();
 
-        let hits = store.search("refund", None, None, 10).unwrap();
+        let hits = store.search("refund", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1, "search should not duplicate notes");
         assert_eq!(
             hits[0].id, "x-coredata://FIXTURE-UUID/ICNote/p1",
@@ -1371,7 +1372,7 @@ mod tests {
             .case_insensitive(true)
             .build()
             .unwrap();
-        let hits = store.search("", Some(&re), None, 10).unwrap();
+        let hits = store.search("", Some(&re), None, 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
     }
@@ -1384,7 +1385,7 @@ mod tests {
             .case_insensitive(true)
             .build()
             .unwrap();
-        let hits = search_indexed_notes(&notes, "", Some(&re), None, 10);
+        let hits = search_indexed_notes(&notes, "", Some(&re), None, 10, false);
         assert_eq!(hits.len(), 2);
     }
 

@@ -1515,6 +1515,28 @@ fn search_no_snippet_suppresses_snippet_lines() {
 }
 
 #[test]
+fn search_invert_match_excludes_matching_notes() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "refund",
+            "--invert-match",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
 fn search_folder_matches_subtree() {
     let (_temp, path) = fixture_db();
     let conn = Connection::open(&path).expect("fixture db");

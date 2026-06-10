@@ -147,4 +147,5 @@ Applied moves do not update existing warmed cache files in place. Rebuild with
 | `--before DATE` | — | Include only notes modified before DATE (YYYY-MM-DD). |
 | `--sort KEY` | `-s` | Sort results by `date` (newest first) or `title` (alphabetical). |
 | `--no-snippet` | — | Suppress snippet lines in human output. |
+| `--invert-match` | `-v` | Return notes that do NOT match the query. |
 | `--json` | — | Structured JSON output (global flag). |
