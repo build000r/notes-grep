@@ -24,6 +24,9 @@ moves:
 - `ng search QUERY --count` prints only the number of matching notes
 - `ng search QUERY --id-only` prints one stable note ID per line
 - `ng search QUERY --quiet` suppresses output; exit 0 on match, exit 1 on none
+- `ng search QUERY --after 2025-01-01` filters to notes modified on or after a date
+- `ng search QUERY --before 2026-01-01` filters to notes modified before a date
+- `ng search QUERY --sort date` sorts results by date (newest first) or title
 - `ng folder list` prints account-prefixed nested folder paths
 - `ng folder mv SOURCE TARGET` previews a folder rename or nested move
 - `ng folder mv SOURCE TARGET --apply` writes the guarded same-account move to

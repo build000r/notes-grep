@@ -27,6 +27,10 @@ commands recorded for `notes-grep-hw0`.
 - Added `--quiet/-q` to suppress output and signal matches via exit code (0 on
   match, 1 on no match), matching `grep`/`rg` conventions.
 - Changed `--folder` to match notes in the named folder and all its subfolders.
+- Added `--after DATE` and `--before DATE` to filter search results by
+  modification date.
+- Added `--sort date` (newest first) and `--sort title` (alphabetical) to
+  control result ordering.
 - Optimized case-insensitive matching with an ASCII fast path that avoids
   per-note allocation.
 

@@ -1422,6 +1422,62 @@ fn search_date_filter_rejects_invalid_date() {
 }
 
 #[test]
+fn search_sort_by_date_newest_first() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let out = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "date",
+        ])
+        .output()
+        .expect("ng runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stripe_pos = stdout.find("Stripe refund").expect("Stripe present");
+    let garden_pos = stdout.find("Garden list").expect("Garden present");
+    assert!(
+        stripe_pos < garden_pos,
+        "newest (Stripe) should appear before oldest (Garden)"
+    );
+}
+
+#[test]
+fn search_sort_by_title_alphabetical() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let out = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "title",
+        ])
+        .output()
+        .expect("ng runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let garden_pos = stdout.find("Garden list").expect("Garden present");
+    let stripe_pos = stdout.find("Stripe refund").expect("Stripe present");
+    assert!(
+        garden_pos < stripe_pos,
+        "Garden should appear before Stripe alphabetically"
+    );
+}
+
+#[test]
 fn search_folder_matches_subtree() {
     let (_temp, path) = fixture_db();
     let conn = Connection::open(&path).expect("fixture db");

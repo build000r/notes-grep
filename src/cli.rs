@@ -104,6 +104,15 @@ struct SearchArgs {
 
     #[arg(long, value_name = "DATE")]
     before: Option<String>,
+
+    #[arg(long, short = 's', value_name = "KEY")]
+    sort: Option<SortKey>,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum SortKey {
+    Date,
+    Title,
 }
 
 #[derive(Debug, Args)]
@@ -369,7 +378,14 @@ fn search(
         )?
     };
 
-    let hits = filter_by_date(hits, args.after.as_deref(), args.before.as_deref())?;
+    let mut hits = filter_by_date(hits, args.after.as_deref(), args.before.as_deref())?;
+
+    if let Some(key) = &args.sort {
+        match key {
+            SortKey::Date => hits.sort_by(|a, b| b.modified.cmp(&a.modified)),
+            SortKey::Title => hits.sort_by(|a, b| a.title.cmp(&b.title)),
+        }
+    }
 
     if args.quiet {
         return if hits.is_empty() {

@@ -143,4 +143,7 @@ Applied moves do not update existing warmed cache files in place. Rebuild with
 | `--count` | `-c` | Print only the match count. |
 | `--id-only` | `-l` | Print one `x-coredata://` ID per line. |
 | `--quiet` | `-q` | Suppress output; exit 0 on match, 1 on no match. |
+| `--after DATE` | — | Include only notes modified on or after DATE (YYYY-MM-DD). |
+| `--before DATE` | — | Include only notes modified before DATE (YYYY-MM-DD). |
+| `--sort KEY` | `-s` | Sort results by `date` (newest first) or `title` (alphabetical). |
 | `--json` | — | Structured JSON output (global flag). |
