@@ -465,6 +465,7 @@ dependencies = [
  "dirs",
  "flate2",
  "predicates",
+ "regex",
  "rusqlite",
  "serde",
  "serde_json",

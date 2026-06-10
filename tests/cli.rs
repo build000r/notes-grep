@@ -1172,6 +1172,77 @@ fn mark_folder_deleted(path: &Path, folder_pk: i64) {
     assert_eq!(updated, 1);
 }
 
+#[test]
+fn search_regex_matches_alternation_across_title_and_body() {
+    let (temp, path) = fixture_db();
+    let cache_dir = temp.path().join("cache");
+
+    // SQLite fallback (no cache): regex alternation on title/snippet
+    let empty_cache = temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            empty_cache.to_str().unwrap(),
+            "--json",
+            "search",
+            "--regex",
+            "str(ip|ipe) ref",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""));
+
+    // Warmed cache: regex alternation matches body text
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "index",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "--regex",
+            "cache-only (alpha|beta)",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""));
+}
+
+#[test]
+fn search_regex_rejects_invalid_pattern() {
+    let (_temp, path) = fixture_db();
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "search",
+            "--regex",
+            "[invalid",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid regex"));
+}
+
 fn body_blob(text: &str) -> Vec<u8> {
     let mut message = Vec::new();
     push_len_field(&mut message, 1, text.as_bytes());

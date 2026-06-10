@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+use regex::Regex;
+
 use crate::notes::{
     FolderEntry, FolderMovePlan, IndexedNote, NgError, NoteHit, NoteMovePlan, StoreStats,
     default_db_path, is_coredata_note_id, open_store, open_store_for_writing, search_indexed_notes,
@@ -84,6 +86,9 @@ struct SearchArgs {
 
     #[arg(long, short = 'n', default_value_t = 20)]
     limit: usize,
+
+    #[arg(long, short = 'e')]
+    regex: bool,
 }
 
 #[derive(Debug, Args)]
@@ -324,13 +329,29 @@ fn search(
     args: SearchArgs,
     json: bool,
 ) -> Result<(), NgError> {
+    let matcher = if args.regex {
+        Some(compile_regex(&args.query)?)
+    } else {
+        None
+    };
     let cache_file = notes_cache_file(cache_override)?;
     let hits = if cache_file.exists() && cache_matches_db(&cache_file, db_path)? {
         let notes = read_indexed_notes(&cache_file)?;
-        search_indexed_notes(&notes, &args.query, args.folder.as_deref(), args.limit)
+        search_indexed_notes(
+            &notes,
+            &args.query,
+            matcher.as_ref(),
+            args.folder.as_deref(),
+            args.limit,
+        )
     } else {
         let store = open_store(db_path)?;
-        store.search(&args.query, args.folder.as_deref(), args.limit)?
+        store.search(
+            &args.query,
+            matcher.as_ref(),
+            args.folder.as_deref(),
+            args.limit,
+        )?
     };
 
     if json {
@@ -647,6 +668,13 @@ fn with_tmp_suffix(path: &Path) -> PathBuf {
         .unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
+}
+
+fn compile_regex(pattern: &str) -> Result<Regex, NgError> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .map_err(|err| NgError::Command(format!("invalid regex: {err}")))
 }
 
 fn unix_now() -> u64 {
