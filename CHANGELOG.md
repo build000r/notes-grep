@@ -31,6 +31,7 @@ commands recorded for `notes-grep-hw0`.
   modification date.
 - Added `--sort date` (newest first) and `--sort title` (alphabetical) to
   control result ordering.
+- Added `--no-snippet` to suppress snippet lines in human search output.
 - Optimized case-insensitive matching with an ASCII fast path that avoids
   per-note allocation.
 

@@ -107,6 +107,9 @@ struct SearchArgs {
 
     #[arg(long, short = 's', value_name = "KEY")]
     sort: Option<SortKey>,
+
+    #[arg(long)]
+    no_snippet: bool,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -404,7 +407,7 @@ fn search(
     } else if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
     } else {
-        print_hits(&hits);
+        print_hits(&hits, args.no_snippet);
         if hits.is_empty() {
             println!(
                 "next: try ng index, ng search \"{}\" --json, or ng doctor",
@@ -578,7 +581,7 @@ fn print_note_move(view: &NoteMoveView) {
     }
 }
 
-fn print_hits(hits: &[NoteHit]) {
+fn print_hits(hits: &[NoteHit], no_snippet: bool) {
     println!("hits: {}", hits.len());
     for hit in hits {
         let folder = hit
@@ -589,10 +592,12 @@ fn print_hits(hits: &[NoteHit]) {
             .unwrap_or("-");
         let id = sanitize_terminal(&hit.id);
         let title = sanitize_terminal(&truncate(&hit.title, 72));
-        let snippet = sanitize_terminal(&truncate(hit.snippet.as_deref().unwrap_or(""), 96));
         println!("{}  {}  {}", id, sanitize_terminal(folder), title);
-        if !snippet.is_empty() {
-            println!("  {snippet}");
+        if !no_snippet {
+            let snippet = sanitize_terminal(&truncate(hit.snippet.as_deref().unwrap_or(""), 96));
+            if !snippet.is_empty() {
+                println!("  {snippet}");
+            }
         }
     }
 }

@@ -27,6 +27,7 @@ moves:
 - `ng search QUERY --after 2025-01-01` filters to notes modified on or after a date
 - `ng search QUERY --before 2026-01-01` filters to notes modified before a date
 - `ng search QUERY --sort date` sorts results by date (newest first) or title
+- `ng search QUERY --no-snippet` suppresses snippet lines in human output
 - `ng folder list` prints account-prefixed nested folder paths
 - `ng folder mv SOURCE TARGET` previews a folder rename or nested move
 - `ng folder mv SOURCE TARGET --apply` writes the guarded same-account move to
