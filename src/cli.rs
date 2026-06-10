@@ -390,32 +390,29 @@ fn search(
         }
     }
 
-    if args.quiet {
-        return if hits.is_empty() {
-            Err(NgError::NoMatch)
+    let empty = hits.is_empty();
+
+    if !args.quiet {
+        if args.count {
+            println!("{}", hits.len());
+        } else if args.id_only {
+            for hit in &hits {
+                println!("{}", hit.id);
+            }
+        } else if json {
+            println!("{}", serde_json::to_string_pretty(&hits)?);
         } else {
-            Ok(())
-        };
+            print_hits(&hits, args.no_snippet);
+            if empty {
+                println!(
+                    "next: try ng index, ng search \"{}\" --json, or ng doctor",
+                    args.query
+                );
+            }
+        }
     }
 
-    if args.count {
-        println!("{}", hits.len());
-    } else if args.id_only {
-        for hit in &hits {
-            println!("{}", hit.id);
-        }
-    } else if json {
-        println!("{}", serde_json::to_string_pretty(&hits)?);
-    } else {
-        print_hits(&hits, args.no_snippet);
-        if hits.is_empty() {
-            println!(
-                "next: try ng index, ng search \"{}\" --json, or ng doctor",
-                args.query
-            );
-        }
-    }
-    Ok(())
+    if empty { Err(NgError::NoMatch) } else { Ok(()) }
 }
 
 fn open_note(args: OpenArgs, json: bool) -> Result<(), NgError> {

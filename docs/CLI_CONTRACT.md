@@ -63,7 +63,7 @@ against the selected database.
 | Code | Meaning |
 |---:|---|
 | 0 | Success. |
-| 1 | No matches found (`--quiet`), or generic local IO/serialization failure. |
+| 1 | No matches found (all search modes), or generic local IO/serialization failure. |
 | 2 | Missing/inaccessible Notes database. |
 | 3 | Unrecognized Notes database schema. |
 | 4 | Failed to open note URL. |

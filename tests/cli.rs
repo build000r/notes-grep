@@ -226,7 +226,7 @@ fn search_does_not_use_cache_for_different_db() {
             "cache-only alpha",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not())
         .stdout(predicate::str::contains("[]"));
 }
@@ -371,7 +371,7 @@ fn search_treats_like_wildcards_as_literals() {
             "%",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not())
         .stdout(predicate::str::contains("Garden list").not())
         .stdout(predicate::str::contains("[]"));
@@ -945,7 +945,7 @@ fn note_move_rebuild_index_updates_folder_filtered_body_search() {
             "Finance",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not());
 }
 
@@ -1279,7 +1279,7 @@ fn search_count_zero_for_no_matches() {
             "nonexistent-query-xyzzy",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::eq("0\n"));
 }
 
