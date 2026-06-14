@@ -12,6 +12,8 @@ use crate::folder::{
     resolve_target, sibling_exists,
 };
 
+const MAX_SEARCH_RESULTS: usize = 10_000;
+
 #[derive(Debug, Error)]
 pub enum NgError {
     #[error(
@@ -207,7 +209,7 @@ impl NotesStore {
         limit: usize,
         invert: bool,
     ) -> Result<Vec<NoteHit>, NgError> {
-        let limit = limit.clamp(1, 10_000);
+        let limit = normalize_search_limit(limit);
         let query_lowercase = query.to_lowercase();
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -222,7 +224,7 @@ impl NotesStore {
             params.push(Box::new(pattern));
         }
         sql.push_str(" ORDER BY note.ZMODIFICATIONDATE1 DESC");
-        if folder.is_none() && like_prefilter {
+        if folder.is_none() && like_prefilter && limit != usize::MAX {
             sql.push_str(" LIMIT ?");
             params.push(Box::new(limit as i64));
         }
@@ -763,7 +765,7 @@ pub fn search_indexed_notes(
     limit: usize,
     invert: bool,
 ) -> Vec<NoteHit> {
-    let limit = limit.clamp(1, 10_000);
+    let limit = normalize_search_limit(limit);
     let query_lowercase = query.to_lowercase();
     notes
         .iter()
@@ -778,6 +780,14 @@ pub fn search_indexed_notes(
         .take(limit)
         .map(|note| note.to_hit(&query_lowercase))
         .collect()
+}
+
+fn normalize_search_limit(limit: usize) -> usize {
+    if limit == usize::MAX {
+        usize::MAX
+    } else {
+        limit.clamp(1, MAX_SEARCH_RESULTS)
+    }
 }
 
 impl IndexedNote {

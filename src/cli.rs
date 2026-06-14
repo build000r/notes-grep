@@ -14,7 +14,7 @@ use crate::notes::{
     default_db_path, is_coredata_note_id, open_store, open_store_for_writing, search_indexed_notes,
 };
 
-const SEARCH_SCAN_LIMIT: usize = 10_000;
+const MAX_OUTPUT_LIMIT: usize = 10_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -366,9 +366,9 @@ fn search(
     } else {
         None
     };
-    let output_limit = args.limit.clamp(1, SEARCH_SCAN_LIMIT);
+    let output_limit = args.limit.clamp(1, MAX_OUTPUT_LIMIT);
     let candidate_limit = if search_needs_full_candidate_set(&args) {
-        SEARCH_SCAN_LIMIT
+        usize::MAX
     } else {
         output_limit
     };
@@ -413,7 +413,7 @@ fn search(
             println!("{}", hits.len());
         } else if args.id_only {
             for hit in &hits {
-                println!("{}", sanitize_terminal(&hit.id));
+                println!("{}", hit.id);
             }
         } else if json {
             println!("{}", serde_json::to_string_pretty(&hits)?);

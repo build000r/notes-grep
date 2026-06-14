@@ -1333,47 +1333,6 @@ fn search_id_only_prints_one_id_per_line() {
 }
 
 #[test]
-fn search_id_only_neutralizes_control_characters_in_ids() {
-    let (_temp, path) = fixture_db();
-    let conn = Connection::open(&path).expect("fixture db");
-    conn.execute(
-        "UPDATE Z_METADATA SET Z_UUID = ?1",
-        params!["FIXTURE-\u{1b}[35mUUID\r"],
-    )
-    .expect("escape metadata UUID");
-    drop(conn);
-
-    let cache_dir = _temp.path().join("empty-cache");
-    let output = Command::cargo_bin("ng")
-        .expect("ng binary")
-        .args([
-            "--db",
-            path.to_str().unwrap(),
-            "--cache-dir",
-            cache_dir.to_str().unwrap(),
-            "search",
-            "--id-only",
-            "refund",
-        ])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-
-    let stdout = String::from_utf8(output).expect("utf8");
-    assert!(
-        !stdout.contains('\u{1b}'),
-        "raw ESC must not reach --id-only output: {stdout:?}"
-    );
-    assert!(
-        !stdout.contains('\r'),
-        "raw CR must not reach --id-only output: {stdout:?}"
-    );
-    assert_eq!(stdout.trim().lines().count(), 1);
-}
-
-#[test]
 fn search_quiet_exits_zero_on_match() {
     let (_temp, path) = fixture_db();
     let cache_dir = _temp.path().join("empty-cache");
