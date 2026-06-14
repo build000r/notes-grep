@@ -1284,6 +1284,28 @@ fn search_count_zero_for_no_matches() {
 }
 
 #[test]
+fn search_count_reports_matches_before_output_limit() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "--limit",
+            "1",
+            "",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("2\n"));
+}
+
+#[test]
 fn search_id_only_prints_one_id_per_line() {
     let (_temp, path) = fixture_db();
     let cache_dir = _temp.path().join("empty-cache");
@@ -1308,6 +1330,47 @@ fn search_id_only_prints_one_id_per_line() {
     let lines: Vec<&str> = stdout.trim().lines().collect();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].starts_with("x-coredata://"));
+}
+
+#[test]
+fn search_id_only_neutralizes_control_characters_in_ids() {
+    let (_temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        "UPDATE Z_METADATA SET Z_UUID = ?1",
+        params!["FIXTURE-\u{1b}[35mUUID\r"],
+    )
+    .expect("escape metadata UUID");
+    drop(conn);
+
+    let cache_dir = _temp.path().join("empty-cache");
+    let output = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--id-only",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw ESC must not reach --id-only output: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "raw CR must not reach --id-only output: {stdout:?}"
+    );
+    assert_eq!(stdout.trim().lines().count(), 1);
 }
 
 #[test]
@@ -1404,21 +1467,54 @@ fn search_before_filters_by_modification_date() {
 }
 
 #[test]
-fn search_date_filter_rejects_invalid_date() {
+fn search_before_applies_before_output_limit() {
     let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
     Command::cargo_bin("ng")
         .expect("ng binary")
         .args([
             "--db",
             path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
             "search",
             "",
-            "--after",
-            "not-a-date",
+            "--before",
+            "2025-01-01",
+            "--limit",
+            "1",
         ])
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("invalid date"));
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_date_filter_rejects_invalid_date() {
+    let (_temp, path) = fixture_db();
+    for invalid_date in [
+        "not-a-date",
+        "not-a-date 12:34:56",
+        "2025-02-31",
+        "2025-01-01 24:00:00",
+    ] {
+        Command::cargo_bin("ng")
+            .expect("ng binary")
+            .args([
+                "--db",
+                path.to_str().unwrap(),
+                "search",
+                "",
+                "--after",
+                invalid_date,
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid date"));
+    }
 }
 
 #[test]
@@ -1475,6 +1571,32 @@ fn search_sort_by_title_alphabetical() {
         garden_pos < stripe_pos,
         "Garden should appear before Stripe alphabetically"
     );
+}
+
+#[test]
+fn search_sort_applies_before_output_limit() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "title",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
 }
 
 #[test]

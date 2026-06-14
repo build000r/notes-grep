@@ -14,6 +14,8 @@ use crate::notes::{
     default_db_path, is_coredata_note_id, open_store, open_store_for_writing, search_indexed_notes,
 };
 
+const SEARCH_SCAN_LIMIT: usize = 10_000;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "ng",
@@ -364,6 +366,12 @@ fn search(
     } else {
         None
     };
+    let output_limit = args.limit.clamp(1, SEARCH_SCAN_LIMIT);
+    let candidate_limit = if search_needs_full_candidate_set(&args) {
+        SEARCH_SCAN_LIMIT
+    } else {
+        output_limit
+    };
     let cache_file = notes_cache_file(cache_override)?;
     let hits = if cache_file.exists() && cache_matches_db(&cache_file, db_path)? {
         let notes = read_indexed_notes(&cache_file)?;
@@ -372,7 +380,7 @@ fn search(
             &args.query,
             matcher.as_ref(),
             args.folder.as_deref(),
-            args.limit,
+            candidate_limit,
             args.invert_match,
         )
     } else {
@@ -381,7 +389,7 @@ fn search(
             &args.query,
             matcher.as_ref(),
             args.folder.as_deref(),
-            args.limit,
+            candidate_limit,
             args.invert_match,
         )?
     };
@@ -396,13 +404,16 @@ fn search(
     }
 
     let empty = hits.is_empty();
+    if !args.count && !args.quiet {
+        hits.truncate(output_limit);
+    }
 
     if !args.quiet {
         if args.count {
             println!("{}", hits.len());
         } else if args.id_only {
             for hit in &hits {
-                println!("{}", hit.id);
+                println!("{}", sanitize_terminal(&hit.id));
             }
         } else if json {
             println!("{}", serde_json::to_string_pretty(&hits)?);
@@ -418,6 +429,10 @@ fn search(
     }
 
     if empty { Err(NgError::NoMatch) } else { Ok(()) }
+}
+
+fn search_needs_full_candidate_set(args: &SearchArgs) -> bool {
+    args.count || args.after.is_some() || args.before.is_some() || args.sort.is_some()
 }
 
 fn open_note(args: OpenArgs, json: bool) -> Result<(), NgError> {
@@ -757,22 +772,81 @@ fn filter_by_date(
 
 fn normalize_date_arg(date: &str) -> Result<String, NgError> {
     let trimmed = date.trim();
-    if trimmed.len() == 10
-        && trimmed.as_bytes().get(4) == Some(&b'-')
-        && trimmed.as_bytes().get(7) == Some(&b'-')
-        && trimmed.bytes().filter(|b| b.is_ascii_digit()).count() == 8
-    {
+    if is_valid_date_arg(trimmed.as_bytes()) {
         return Ok(format!("{trimmed} 00:00:00"));
     }
-    if trimmed.len() == 19
-        && trimmed.as_bytes().get(10) == Some(&b' ')
-        && trimmed.as_bytes().get(13) == Some(&b':')
-    {
+    if is_valid_datetime_arg(trimmed.as_bytes()) {
         return Ok(trimmed.to_owned());
     }
     Err(NgError::Command(format!(
         "invalid date: '{trimmed}'. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS."
     )))
+}
+
+fn is_valid_datetime_arg(bytes: &[u8]) -> bool {
+    if bytes.len() != 19
+        || bytes[10] != b' '
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !is_valid_date_arg(&bytes[..10])
+    {
+        return false;
+    }
+
+    let Some(hour) = parse_ascii_u32(bytes, 11, 2) else {
+        return false;
+    };
+    let Some(minute) = parse_ascii_u32(bytes, 14, 2) else {
+        return false;
+    };
+    let Some(second) = parse_ascii_u32(bytes, 17, 2) else {
+        return false;
+    };
+    hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn is_valid_date_arg(bytes: &[u8]) -> bool {
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+
+    let Some(year) = parse_ascii_u32(bytes, 0, 4) else {
+        return false;
+    };
+    let Some(month) = parse_ascii_u32(bytes, 5, 2) else {
+        return false;
+    };
+    let Some(day) = parse_ascii_u32(bytes, 8, 2) else {
+        return false;
+    };
+    let max_day = days_in_month(year, month);
+    max_day != 0 && (1..=max_day).contains(&day)
+}
+
+fn parse_ascii_u32(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
+    let end = start.checked_add(len)?;
+    let mut value = 0u32;
+    for &byte in bytes.get(start..end)? {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u32::from(byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year % 4 == 0 && year % 100 != 0 || year % 400 == 0
 }
 
 fn compile_regex(pattern: &str) -> Result<Regex, NgError> {
