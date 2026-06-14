@@ -1020,10 +1020,13 @@ fn apple_reference_now() -> f64 {
 }
 
 fn contains_case_insensitive(haystack: &str, needle_lowercase: &str) -> bool {
-    if haystack.len() < needle_lowercase.len() {
-        return false;
+    if needle_lowercase.is_empty() {
+        return true;
     }
     if haystack.is_ascii() && needle_lowercase.is_ascii() {
+        if haystack.len() < needle_lowercase.len() {
+            return false;
+        }
         return haystack
             .as_bytes()
             .windows(needle_lowercase.len())
@@ -1168,6 +1171,40 @@ mod tests {
         let hits = store.search("REFUND", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
+    }
+
+    #[test]
+    fn contains_case_insensitive_handles_expanding_lowercase() {
+        let needle = "İ".to_lowercase();
+        assert!(
+            contains_case_insensitive("İ", &needle),
+            "unicode lowercase expansion must not be rejected by byte length"
+        );
+    }
+
+    #[test]
+    fn search_matches_unicode_lowercase_expansion() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'İstanbul itinerary', 'Turkish dotted capital I', 10, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let hits = store.search("İSTANBUL", None, None, 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "SQLite fallback should match");
+        assert_eq!(hits[0].title, "İstanbul itinerary");
+
+        let indexed = store.all_indexed_notes().unwrap();
+        let hits = search_indexed_notes(&indexed, "İSTANBUL", None, None, 10, false);
+        assert_eq!(hits.len(), 1, "warmed cache search should match");
+        assert_eq!(hits[0].title, "İstanbul itinerary");
     }
 
     #[test]
