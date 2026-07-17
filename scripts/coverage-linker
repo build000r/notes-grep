@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Rust coverage builds force the LLVM profile runtime with `-u SYMBOL`.
+# The local Skillbox cc/gcc wrappers route through `zig cc`, which rejects that
+# driver spelling. Forward all other linker args untouched, but translate this
+# one form into the linker spelling accepted by Zig, Clang, and GCC.
+linker="${COVERAGE_CC:-${CC:-cc}}"
+args=()
+
+while (($#)); do
+  case "$1" in
+    -u)
+      shift
+      if (($# == 0)); then
+        printf '%s\n' "coverage-linker: -u requires a symbol" >&2
+        exit 1
+      fi
+      args+=("-Wl,-u,$1")
+      ;;
+    *)
+      args+=("$1")
+      ;;
+  esac
+  shift
+done
+
+exec "$linker" "${args[@]}"

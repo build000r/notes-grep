@@ -7,10 +7,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 
+use regex::Regex;
+
 use crate::notes::{
     FolderEntry, FolderMovePlan, IndexedNote, NgError, NoteHit, NoteMovePlan, StoreStats,
     default_db_path, is_coredata_note_id, open_store, open_store_for_writing, search_indexed_notes,
 };
+
+const MAX_OUTPUT_LIMIT: usize = 10_000;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -84,6 +88,39 @@ struct SearchArgs {
 
     #[arg(long, short = 'n', default_value_t = 20)]
     limit: usize,
+
+    #[arg(long, short = 'e')]
+    regex: bool,
+
+    #[arg(long, short = 'c')]
+    count: bool,
+
+    #[arg(long, short = 'l')]
+    id_only: bool,
+
+    #[arg(long, short = 'q')]
+    quiet: bool,
+
+    #[arg(long, value_name = "DATE")]
+    after: Option<String>,
+
+    #[arg(long, value_name = "DATE")]
+    before: Option<String>,
+
+    #[arg(long, short = 's', value_name = "KEY")]
+    sort: Option<SortKey>,
+
+    #[arg(long)]
+    no_snippet: bool,
+
+    #[arg(long, short = 'v')]
+    invert_match: bool,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum)]
+enum SortKey {
+    Date,
+    Title,
 }
 
 #[derive(Debug, Args)]
@@ -193,16 +230,9 @@ pub fn run() -> Result<(), NgError> {
 }
 
 fn print_home(db_path: &Path, json: bool) -> Result<(), NgError> {
-    let status = match open_store(db_path).and_then(|store| store.stats()) {
-        Ok(_) => "ready",
-        Err(NgError::DatabaseMissing(_)) => "missing-notes-db",
-        Err(NgError::DatabaseOpen { .. }) => "needs-full-disk-access",
-        Err(NgError::Schema(_)) => "unrecognized-notes-schema",
-        Err(_) => "needs-attention",
-    };
     let view = HomeView {
         tool: "ng",
-        status,
+        status: home_status(db_path),
         db: db_path.display().to_string(),
         commands: vec![
             "ng doctor",
@@ -222,6 +252,16 @@ fn print_home(db_path: &Path, json: bool) -> Result<(), NgError> {
         println!("next: {}", view.commands.join(" | "));
     }
     Ok(())
+}
+
+fn home_status(db_path: &Path) -> &'static str {
+    match open_store(db_path).and_then(|store| store.stats()) {
+        Ok(_) => "ready",
+        Err(NgError::DatabaseMissing(_)) => "missing-notes-db",
+        Err(NgError::DatabaseOpen { .. }) => "needs-full-disk-access",
+        Err(NgError::Schema(_)) => "unrecognized-notes-schema",
+        Err(_) => "needs-attention",
+    }
 }
 
 fn doctor(db_path: &Path, cache_override: Option<PathBuf>, json: bool) -> Result<(), NgError> {
@@ -321,27 +361,78 @@ fn search(
     args: SearchArgs,
     json: bool,
 ) -> Result<(), NgError> {
+    let matcher = if args.regex {
+        Some(compile_regex(&args.query)?)
+    } else {
+        None
+    };
+    let output_limit = args.limit.clamp(1, MAX_OUTPUT_LIMIT);
+    let candidate_limit = if search_needs_full_candidate_set(&args) {
+        usize::MAX
+    } else {
+        output_limit
+    };
     let cache_file = notes_cache_file(cache_override)?;
     let hits = if cache_file.exists() && cache_matches_db(&cache_file, db_path)? {
         let notes = read_indexed_notes(&cache_file)?;
-        search_indexed_notes(&notes, &args.query, args.folder.as_deref(), args.limit)
+        search_indexed_notes(
+            &notes,
+            &args.query,
+            matcher.as_ref(),
+            args.folder.as_deref(),
+            candidate_limit,
+            args.invert_match,
+        )
     } else {
         let store = open_store(db_path)?;
-        store.search(&args.query, args.folder.as_deref(), args.limit)?
+        store.search(
+            &args.query,
+            matcher.as_ref(),
+            args.folder.as_deref(),
+            candidate_limit,
+            args.invert_match,
+        )?
     };
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&hits)?);
-    } else {
-        print_hits(&hits);
-        if hits.is_empty() {
-            println!(
-                "next: try ng index, ng search \"{}\" --json, or ng doctor",
-                args.query
-            );
+    let mut hits = filter_by_date(hits, args.after.as_deref(), args.before.as_deref())?;
+
+    if let Some(key) = &args.sort {
+        match key {
+            SortKey::Date => hits.sort_by(|a, b| b.modified.cmp(&a.modified)),
+            SortKey::Title => hits.sort_by(|a, b| a.title.cmp(&b.title)),
         }
     }
-    Ok(())
+
+    let empty = hits.is_empty();
+    if !args.count && !args.quiet {
+        hits.truncate(output_limit);
+    }
+
+    if !args.quiet {
+        if args.count {
+            println!("{}", hits.len());
+        } else if args.id_only {
+            for hit in &hits {
+                println!("{}", hit.id);
+            }
+        } else if json {
+            println!("{}", serde_json::to_string_pretty(&hits)?);
+        } else {
+            print_hits(&hits, args.no_snippet);
+            if empty {
+                println!(
+                    "next: try ng index, ng search \"{}\" --json, or ng doctor",
+                    args.query
+                );
+            }
+        }
+    }
+
+    if empty { Err(NgError::NoMatch) } else { Ok(()) }
+}
+
+fn search_needs_full_candidate_set(args: &SearchArgs) -> bool {
+    args.count || args.after.is_some() || args.before.is_some() || args.sort.is_some()
 }
 
 fn open_note(args: OpenArgs, json: bool) -> Result<(), NgError> {
@@ -442,7 +533,7 @@ fn print_stats(stats: &StoreStats) {
 fn print_folders(folders: &[FolderEntry]) {
     println!("folders: {}", folders.len());
     for folder in folders {
-        println!("{}", folder.account_path);
+        println!("{}", sanitize_terminal(&folder.account_path));
     }
 }
 
@@ -460,8 +551,8 @@ fn folder_move_view(plan: &FolderMovePlan, applied: bool) -> FolderMoveView {
 
 fn print_folder_move(view: &FolderMoveView) {
     println!("folder-move: {}", view.status);
-    println!("source: {}", view.source);
-    println!("target: {}", view.target);
+    println!("source: {}", sanitize_terminal(&view.source));
+    println!("target: {}", sanitize_terminal(&view.target));
     println!("changed: {}", view.changed);
     println!("descendant-folders: {}", view.descendant_folders);
     println!("notes: {}", view.notes);
@@ -485,10 +576,19 @@ fn note_move_view(plan: &NoteMovePlan, applied: bool) -> NoteMoveView {
 
 fn print_note_move(view: &NoteMoveView) {
     println!("note-move: {}", view.status);
-    println!("note-id: {}", view.note_id);
-    println!("title: {}", truncate(&view.note_title, 96));
-    println!("source-folder: {}", view.source_folder_path);
-    println!("target-folder: {}", view.target_folder_path);
+    println!("note-id: {}", sanitize_terminal(&view.note_id));
+    println!(
+        "title: {}",
+        sanitize_terminal(&truncate(&view.note_title, 96))
+    );
+    println!(
+        "source-folder: {}",
+        sanitize_terminal(&view.source_folder_path)
+    );
+    println!(
+        "target-folder: {}",
+        sanitize_terminal(&view.target_folder_path)
+    );
     println!("changed: {}", view.changed);
     println!("applied: {}", view.applied);
     if !view.applied {
@@ -498,7 +598,7 @@ fn print_note_move(view: &NoteMoveView) {
     }
 }
 
-fn print_hits(hits: &[NoteHit]) {
+fn print_hits(hits: &[NoteHit], no_snippet: bool) {
     println!("hits: {}", hits.len());
     for hit in hits {
         let folder = hit
@@ -507,13 +607,51 @@ fn print_hits(hits: &[NoteHit]) {
             .or(hit.folder_path.as_deref())
             .or(hit.folder.as_deref())
             .unwrap_or("-");
-        let title = truncate(&hit.title, 72);
-        let snippet = truncate(hit.snippet.as_deref().unwrap_or(""), 96);
-        println!("{}  {}  {}", hit.id, folder, title);
-        if !snippet.is_empty() {
-            println!("  {}", snippet.replace('\n', " "));
+        let id = sanitize_terminal(&hit.id);
+        let title = sanitize_terminal(&truncate(&hit.title, 72));
+        println!("{}  {}  {}", id, sanitize_terminal(folder), title);
+        if !no_snippet {
+            let snippet = sanitize_terminal(&truncate(hit.snippet.as_deref().unwrap_or(""), 96));
+            if !snippet.is_empty() {
+                println!("  {snippet}");
+            }
         }
     }
+}
+
+/// Render untrusted note/folder text inert for terminal display. Apple Notes
+/// titles, snippets, decoded body lines, and folder/account names are
+/// attacker-influenced (a shared or imported note can carry arbitrary bytes).
+/// Without this, an embedded ANSI/terminal escape (ESC = U+001B, bare CR, BS,
+/// etc.) would reach the user's terminal raw and could recolor or overwrite
+/// output, hide note IDs before an `ng note mv`/`ng open`, or trigger
+/// terminal-specific control-sequence behavior. C0/C1 control characters are
+/// replaced with a visible placeholder; ordinary whitespace runs (including
+/// newlines) collapse to a single space so a hit stays on its own line. The
+/// `--json` path is unaffected because serde_json already escapes U+0000-U+001F.
+fn sanitize_terminal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            pending_space = true;
+            continue;
+        }
+        if pending_space {
+            out.push(' ');
+            pending_space = false;
+        }
+        // `char::is_control` covers C0 (U+0000-U+001F) and C1/DEL
+        // (U+007F-U+009F) control characters. Any that survived earlier
+        // decoding are replaced with a visible marker so the user can tell
+        // content was scrubbed rather than silently dropped.
+        if ch.is_control() {
+            out.push('\u{fffd}');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn truncate(value: &str, max_chars: usize) -> String {
@@ -599,6 +737,123 @@ fn with_tmp_suffix(path: &Path) -> PathBuf {
         .unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
+}
+
+fn filter_by_date(
+    hits: Vec<NoteHit>,
+    after: Option<&str>,
+    before: Option<&str>,
+) -> Result<Vec<NoteHit>, NgError> {
+    if after.is_none() && before.is_none() {
+        return Ok(hits);
+    }
+    let after = after.map(normalize_date_arg).transpose()?;
+    let before = before.map(normalize_date_arg).transpose()?;
+    Ok(hits
+        .into_iter()
+        .filter(|hit| {
+            let Some(modified) = hit.modified.as_deref() else {
+                return false;
+            };
+            if let Some(ref after) = after {
+                if modified < after.as_str() {
+                    return false;
+                }
+            }
+            if let Some(ref before) = before {
+                if modified >= before.as_str() {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect())
+}
+
+fn normalize_date_arg(date: &str) -> Result<String, NgError> {
+    let trimmed = date.trim();
+    if is_valid_date_arg(trimmed.as_bytes()) {
+        return Ok(format!("{trimmed} 00:00:00"));
+    }
+    if is_valid_datetime_arg(trimmed.as_bytes()) {
+        return Ok(trimmed.to_owned());
+    }
+    Err(NgError::Command(format!(
+        "invalid date: '{trimmed}'. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS."
+    )))
+}
+
+fn is_valid_datetime_arg(bytes: &[u8]) -> bool {
+    if bytes.len() != 19
+        || bytes[10] != b' '
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || !is_valid_date_arg(&bytes[..10])
+    {
+        return false;
+    }
+
+    let Some(hour) = parse_ascii_u32(bytes, 11, 2) else {
+        return false;
+    };
+    let Some(minute) = parse_ascii_u32(bytes, 14, 2) else {
+        return false;
+    };
+    let Some(second) = parse_ascii_u32(bytes, 17, 2) else {
+        return false;
+    };
+    hour <= 23 && minute <= 59 && second <= 59
+}
+
+fn is_valid_date_arg(bytes: &[u8]) -> bool {
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return false;
+    }
+
+    let Some(year) = parse_ascii_u32(bytes, 0, 4) else {
+        return false;
+    };
+    let Some(month) = parse_ascii_u32(bytes, 5, 2) else {
+        return false;
+    };
+    let Some(day) = parse_ascii_u32(bytes, 8, 2) else {
+        return false;
+    };
+    let max_day = days_in_month(year, month);
+    max_day != 0 && (1..=max_day).contains(&day)
+}
+
+fn parse_ascii_u32(bytes: &[u8], start: usize, len: usize) -> Option<u32> {
+    let end = start.checked_add(len)?;
+    let mut value = 0u32;
+    for &byte in bytes.get(start..end)? {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + u32::from(byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: u32) -> bool {
+    year % 4 == 0 && year % 100 != 0 || year % 400 == 0
+}
+
+fn compile_regex(pattern: &str) -> Result<Regex, NgError> {
+    regex::RegexBuilder::new(pattern)
+        .case_insensitive(true)
+        .build()
+        .map_err(|err| NgError::Command(format!("invalid regex: {err}")))
 }
 
 fn unix_now() -> u64 {

@@ -20,6 +20,15 @@ moves:
   `ZICNOTEDATA.ZDATA`
 - `ng search QUERY` searches the warmed JSONL cache when it exists, falling
   back to direct title/snippet SQLite search before the first matching index
+- `ng search QUERY --regex` interprets the query as a case-insensitive regex
+- `ng search QUERY --count` prints only the number of matching notes
+- `ng search QUERY --id-only` prints one stable note ID per line
+- `ng search QUERY --quiet` suppresses output; exit 0 on match, exit 1 on none
+- `ng search QUERY --after 2025-01-01` filters to notes modified on or after a date
+- `ng search QUERY --before 2026-01-01` filters to notes modified before a date
+- `ng search QUERY --sort date` sorts results by date (newest first) or title
+- `ng search QUERY --no-snippet` suppresses snippet lines in human output
+- `ng search QUERY --invert-match` returns notes that do NOT match the query
 - `ng folder list` prints account-prefixed nested folder paths
 - `ng folder mv SOURCE TARGET` previews a folder rename or nested move
 - `ng folder mv SOURCE TARGET --apply` writes the guarded same-account move to
@@ -32,9 +41,9 @@ moves:
 - `--json` and `--cache-dir` are available for agent use
 
 The body decoder gzip-decodes Apple Notes `ZICNOTEDATA.ZDATA` blobs and walks
-their protobuf wire fields for UTF-8 note text. Regex search, Tantivy, semantic
-search, attachments, and OCR/table text are deferred until this extraction/cache
-path is proven.
+their protobuf wire fields for UTF-8 note text. Search supports both literal
+substring and regex modes with `rg`-style output flags (`--count`, `--id-only`,
+`--quiet`). Tantivy, semantic search, attachments, and OCR/table text are deferred.
 
 ## Install Locally
 
@@ -83,6 +92,10 @@ ng folder list
 ng folder mv "Finance/Receipts" "Archive/Receipts"
 ng folder mv "Finance/Receipts" "Archive/Receipts" --apply
 ng search "refund" --json
+ng search "str(ip|ipe) ref" --regex --json
+ng search "invoice" --folder Finance --count
+ng search "receipt" --id-only
+ng search "urgent" --quiet && echo "found"
 ng note mv "x-coredata://.../ICNote/p123" "Archive/Receipts"
 ng note mv "x-coredata://.../ICNote/p123" "Archive/Receipts" --apply
 ng --cache-dir /tmp/ng-cache index
@@ -90,7 +103,8 @@ ng --cache-dir /tmp/ng-cache search "body-only phrase" --json
 ng open "x-coredata://.../ICNote/p123"
 ```
 
-Folder paths use `/` as the nested-container separator. Commands accept
+Folder paths use `/` as the nested-container separator. `ng search --folder`
+matches notes in the named folder and all its subfolders. Commands accept
 account-prefixed paths such as `iCloud/Finance/Receipts` when an unprefixed path
 is ambiguous. `ng folder mv` treats the target as the folder's final path: a
 one-segment target renames in place, while a multi-segment target moves under the

@@ -17,3 +17,9 @@ dist/
 .beads/*.db
 .beads/*.db-shm
 .beads/*.db-wal
+
+# Local agent/tooling state — not part of the public crate
+.mcp.json
+
+# bv (beads viewer) local config and caches
+.bv/

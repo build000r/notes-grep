@@ -103,6 +103,37 @@ fn doctor_reports_fixture_counts() {
 }
 
 #[test]
+fn home_human_output_reports_ready_status_and_next_commands() {
+    let (_temp, path) = fixture_db();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", path.to_str().unwrap()])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("ng: ready"))
+        .stdout(predicate::str::contains("next: ng doctor"))
+        .stdout(predicate::str::contains("ng note mv NOTE_ID FOLDER"));
+}
+
+#[test]
+fn home_json_output_reports_missing_database_without_error() {
+    let missing_db = TempDir::new()
+        .expect("temp dir")
+        .path()
+        .join("missing.sqlite");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args(["--db", missing_db.to_str().unwrap(), "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"missing-notes-db\""))
+        .stdout(predicate::str::contains("\"commands\""))
+        .stdout(predicate::str::contains("ng doctor"));
+}
+
+#[test]
 fn index_writes_full_body_cache_records() {
     let (temp, path) = fixture_db();
     let cache_dir = temp.path().join("cache");
@@ -195,7 +226,7 @@ fn search_does_not_use_cache_for_different_db() {
             "cache-only alpha",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not())
         .stdout(predicate::str::contains("[]"));
 }
@@ -289,6 +320,41 @@ fn search_folder_accepts_account_prefixed_paths() {
 }
 
 #[test]
+fn search_sqlite_fallback_matches_unicode_case_insensitively() {
+    let (temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, 'Café résumé', 'naïve notes', 10, 750000000, 0)
+        "#,
+        [],
+    )
+    .expect("unicode note");
+    drop(conn);
+
+    // No warmed cache, so this exercises the direct SQLite fallback. SQLite
+    // `LIKE` only case-folds ASCII; an uppercase non-ASCII query must still
+    // match the lower-cased title/snippet, matching the warmed-cache path.
+    let cache_dir = temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "CAFÉ",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Café résumé\""));
+}
+
+#[test]
 fn search_treats_like_wildcards_as_literals() {
     let (_temp, path) = fixture_db();
     let cache_dir = _temp.path().join("empty-cache");
@@ -305,7 +371,7 @@ fn search_treats_like_wildcards_as_literals() {
             "%",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not())
         .stdout(predicate::str::contains("Garden list").not())
         .stdout(predicate::str::contains("[]"));
@@ -541,6 +607,43 @@ fn note_move_dry_run_json_does_not_write() {
             "\"target_folder_path\": \"iCloud/Personal\"",
         ));
 
+    assert_note_folder(&path, 1, 10);
+}
+
+#[test]
+fn note_move_human_output_neutralizes_note_id_escape_sequences() {
+    let (_temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        "UPDATE Z_METADATA SET Z_UUID = ?1",
+        params!["FIXTURE-\u{1b}[35mUUID"],
+    )
+    .expect("escape metadata UUID");
+    drop(conn);
+
+    let escaped_note_id = "x-coredata://FIXTURE-\u{1b}[35mUUID/ICNote/p1";
+    let output = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "note",
+            "mv",
+            escaped_note_id,
+            "Personal",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(stdout.contains("note-move: dry-run"));
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw ESC must not reach the terminal: {stdout:?}"
+    );
     assert_note_folder(&path, 1, 10);
 }
 
@@ -842,7 +945,7 @@ fn note_move_rebuild_index_updates_folder_filtered_body_search() {
             "Finance",
         ])
         .assert()
-        .success()
+        .failure()
         .stdout(predicate::str::contains("Stripe refund").not());
 }
 
@@ -961,6 +1064,69 @@ fn add_second_account(path: &Path) {
     .expect("second account");
 }
 
+/// Security regression: untrusted note content (title and decoded body that
+/// becomes a snippet) can contain ANSI/terminal escape sequences. The default
+/// human-readable `ng search` output must not emit raw control characters
+/// (e.g. ESC, U+001B) to the terminal, or a crafted note could hijack the
+/// user's terminal. JSON output is unaffected (serde_json escapes controls).
+#[test]
+fn search_human_output_neutralizes_terminal_escape_sequences() {
+    let (temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        "UPDATE Z_METADATA SET Z_UUID = ?1",
+        params!["FIXTURE-\u{1b}[35mUUID"],
+    )
+    .expect("escape metadata UUID");
+    // Title and snippet both carry an ESC-based ANSI sequence plus a bare CR.
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, ?1, ?2, 10, 850000000, 0)
+        "#,
+        params![
+            "Pwned \u{1b}[31mtitle\u{1b}[0m\rline",
+            "Refund \u{1b}[2Jcleared\u{1b}[0m snippet",
+        ],
+    )
+    .expect("escape note");
+    drop(conn);
+
+    let cache_dir = temp.path().join("empty-cache");
+    let mut cmd = Command::cargo_bin("ng").expect("ng binary");
+    let output = cmd
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    // The note must still surface (we did not drop the match), but no raw ESC
+    // (0x1b) or bare CR (0x0d) byte may reach the terminal.
+    let stdout = String::from_utf8(output).expect("utf8 stdout");
+    assert!(
+        stdout.contains("title"),
+        "matching note should still appear: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "raw ESC must not reach the terminal: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "raw CR must not reach the terminal: {stdout:?}"
+    );
+}
+
 fn clear_account_name(path: &Path) {
     let conn = Connection::open(path).expect("fixture db");
     let updated = conn
@@ -1004,6 +1170,487 @@ fn mark_folder_deleted(path: &Path, folder_pk: i64) {
         )
         .expect("mark deleted");
     assert_eq!(updated, 1);
+}
+
+#[test]
+fn search_regex_matches_alternation_across_title_and_body() {
+    let (temp, path) = fixture_db();
+    let cache_dir = temp.path().join("cache");
+
+    // SQLite fallback (no cache): regex alternation on title/snippet
+    let empty_cache = temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            empty_cache.to_str().unwrap(),
+            "--json",
+            "search",
+            "--regex",
+            "str(ip|ipe) ref",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""));
+
+    // Warmed cache: regex alternation matches body text
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "index",
+        ])
+        .assert()
+        .success();
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "--regex",
+            "cache-only (alpha|beta)",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""));
+}
+
+#[test]
+fn search_regex_rejects_invalid_pattern() {
+    let (_temp, path) = fixture_db();
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "search",
+            "--regex",
+            "[invalid",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("invalid regex"));
+}
+
+#[test]
+fn search_count_prints_bare_integer() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "and",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("1\n"));
+}
+
+#[test]
+fn search_count_zero_for_no_matches() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "nonexistent-query-xyzzy",
+        ])
+        .assert()
+        .failure()
+        .stdout(predicate::eq("0\n"));
+}
+
+#[test]
+fn search_count_reports_matches_before_output_limit() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--count",
+            "--limit",
+            "1",
+            "",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("2\n"));
+}
+
+#[test]
+fn search_id_only_prints_one_id_per_line() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let output = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--id-only",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let stdout = String::from_utf8(output).expect("utf8");
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with("x-coredata://"));
+}
+
+#[test]
+fn search_quiet_exits_zero_on_match() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--quiet",
+            "refund",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn search_quiet_exits_nonzero_on_no_match() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "--quiet",
+            "nonexistent-query-xyzzy",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::is_empty());
+}
+
+#[test]
+fn search_after_filters_by_modification_date() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    // Note 1 modified at Apple ref 800000000 -> 2026-05-09
+    // Note 2 modified at Apple ref 700000000 -> 2023-03-08
+    // --after 2025-01-01 should return only note 1
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--after",
+            "2025-01-01",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("Garden list").not());
+}
+
+#[test]
+fn search_before_filters_by_modification_date() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    // --before 2025-01-01 should return only note 2
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--before",
+            "2025-01-01",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_before_applies_before_output_limit() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--before",
+            "2025-01-01",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_date_filter_rejects_invalid_date() {
+    let (_temp, path) = fixture_db();
+    for invalid_date in [
+        "not-a-date",
+        "not-a-date 12:34:56",
+        "2025-02-31",
+        "2025-01-01 24:00:00",
+    ] {
+        Command::cargo_bin("ng")
+            .expect("ng binary")
+            .args([
+                "--db",
+                path.to_str().unwrap(),
+                "search",
+                "",
+                "--after",
+                invalid_date,
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid date"));
+    }
+}
+
+#[test]
+fn search_sort_by_date_newest_first() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let out = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "date",
+        ])
+        .output()
+        .expect("ng runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stripe_pos = stdout.find("Stripe refund").expect("Stripe present");
+    let garden_pos = stdout.find("Garden list").expect("Garden present");
+    assert!(
+        stripe_pos < garden_pos,
+        "newest (Stripe) should appear before oldest (Garden)"
+    );
+}
+
+#[test]
+fn search_sort_by_title_alphabetical() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    let out = Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "title",
+        ])
+        .output()
+        .expect("ng runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let garden_pos = stdout.find("Garden list").expect("Garden present");
+    let stripe_pos = stdout.find("Stripe refund").expect("Stripe present");
+    assert!(
+        garden_pos < stripe_pos,
+        "Garden should appear before Stripe alphabetically"
+    );
+}
+
+#[test]
+fn search_sort_applies_before_output_limit() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--sort",
+            "title",
+            "--limit",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_no_snippet_suppresses_snippet_lines() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    // Without --no-snippet, snippet text appears
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Refund receipt follow-up"));
+
+    // With --no-snippet, snippet text is suppressed
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "search",
+            "",
+            "--no-snippet",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Stripe refund"))
+        .stdout(predicate::str::contains("Refund receipt follow-up").not());
+}
+
+#[test]
+fn search_invert_match_excludes_matching_notes() {
+    let (_temp, path) = fixture_db();
+    let cache_dir = _temp.path().join("empty-cache");
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "refund",
+            "--invert-match",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Garden list\""))
+        .stdout(predicate::str::contains("Stripe refund").not());
+}
+
+#[test]
+fn search_folder_matches_subtree() {
+    let (_temp, path) = fixture_db();
+    let conn = Connection::open(&path).expect("fixture db");
+    conn.execute(
+        r#"
+        INSERT INTO ZICCLOUDSYNCINGOBJECT
+            (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+        VALUES (3, 12, 1, 'Trip receipt', 'Airline ticket', 21, 750000000, 0)
+        "#,
+        [],
+    )
+    .expect("subtree note");
+    drop(conn);
+
+    let cache_dir = _temp.path().join("empty-cache");
+    // --folder Finance should find notes in Finance AND Finance/Receipts/Trips
+    Command::cargo_bin("ng")
+        .expect("ng binary")
+        .args([
+            "--db",
+            path.to_str().unwrap(),
+            "--cache-dir",
+            cache_dir.to_str().unwrap(),
+            "--json",
+            "search",
+            "",
+            "--folder",
+            "iCloud/Finance",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"title\": \"Stripe refund\""))
+        .stdout(predicate::str::contains("\"title\": \"Trip receipt\""));
 }
 
 fn body_blob(text: &str) -> Vec<u8> {

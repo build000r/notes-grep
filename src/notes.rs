@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,6 +7,12 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::body::decode_note_body;
+use crate::folder::{
+    RawFolder, build_folder_entries, descendant_folder_ids, parent_chain_contains, resolve_folder,
+    resolve_target, sibling_exists,
+};
+
+const MAX_SEARCH_RESULTS: usize = 10_000;
 
 #[derive(Debug, Error)]
 pub enum NgError {
@@ -28,6 +34,8 @@ pub enum NgError {
     NoDataDir,
     #[error("failed to open note")]
     OpenFailed,
+    #[error("")]
+    NoMatch,
     #[error("{0}")]
     Command(String),
     #[error(transparent)]
@@ -45,6 +53,7 @@ impl NgError {
             Self::DatabaseMissing(_) | Self::DatabaseOpen { .. } => 2,
             Self::Schema(_) => 3,
             Self::OpenFailed => 4,
+            Self::NoMatch => 1,
             Self::NoDataDir | Self::Command(_) | Self::Sqlite(_) | Self::Io(_) | Self::Json(_) => 1,
         }
     }
@@ -195,15 +204,19 @@ impl NotesStore {
     pub fn search(
         &self,
         query: &str,
+        regex: Option<&regex::Regex>,
         folder: Option<&str>,
         limit: usize,
+        invert: bool,
     ) -> Result<Vec<NoteHit>, NgError> {
-        let limit = limit.clamp(1, 10_000);
-        let pattern = like_contains_pattern(query);
+        let limit = normalize_search_limit(limit);
+        let query_lowercase = query.to_lowercase();
         let mut sql = base_note_query();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-        if !query.is_empty() {
+        let like_prefilter = !invert && regex.is_none() && !query.is_empty() && query.is_ascii();
+        if like_prefilter {
+            let pattern = like_contains_pattern(query);
             sql.push_str(
                 " AND (note.ZTITLE1 LIKE ? ESCAPE '\\' OR COALESCE(note.ZSNIPPET, '') LIKE ? ESCAPE '\\')",
             );
@@ -211,7 +224,7 @@ impl NotesStore {
             params.push(Box::new(pattern));
         }
         sql.push_str(" ORDER BY note.ZMODIFICATIONDATE1 DESC");
-        if folder.is_none() {
+        if folder.is_none() && like_prefilter && limit != usize::MAX {
             sql.push_str(" LIMIT ?");
             params.push(Box::new(limit as i64));
         }
@@ -233,6 +246,13 @@ impl NotesStore {
         let hits = hits
             .into_iter()
             .map(|hit| hit.note)
+            .filter(|hit| {
+                let matches = match regex {
+                    Some(re) => note_hit_matches_regex(hit, re),
+                    None => note_hit_matches_query(hit, &query_lowercase),
+                };
+                matches != invert
+            })
             .filter(|hit| folder.is_none_or(|folder_name| note_hit_in_folder(hit, folder_name)))
             .take(limit)
             .collect();
@@ -740,21 +760,38 @@ impl NotesStore {
 pub fn search_indexed_notes(
     notes: &[IndexedNote],
     query: &str,
+    regex: Option<&regex::Regex>,
     folder: Option<&str>,
     limit: usize,
+    invert: bool,
 ) -> Vec<NoteHit> {
-    let limit = limit.clamp(1, 10_000);
+    let limit = normalize_search_limit(limit);
+    let query_lowercase = query.to_lowercase();
     notes
         .iter()
         .filter(|note| folder.is_none_or(|folder_name| indexed_note_in_folder(note, folder_name)))
-        .filter(|note| indexed_note_matches(note, query))
+        .filter(|note| {
+            let matches = match regex {
+                Some(re) => indexed_note_matches_regex(note, re),
+                None => indexed_note_matches(note, &query_lowercase),
+            };
+            matches != invert
+        })
         .take(limit)
-        .map(|note| note.to_hit(query))
+        .map(|note| note.to_hit(&query_lowercase))
         .collect()
 }
 
+fn normalize_search_limit(limit: usize) -> usize {
+    if limit == usize::MAX {
+        usize::MAX
+    } else {
+        limit.clamp(1, MAX_SEARCH_RESULTS)
+    }
+}
+
 impl IndexedNote {
-    fn to_hit(&self, query: &str) -> NoteHit {
+    fn to_hit(&self, query_lowercase: &str) -> NoteHit {
         NoteHit {
             id: self.id.clone(),
             db_id: self.db_id,
@@ -762,7 +799,7 @@ impl IndexedNote {
             folder: self.folder.clone(),
             folder_path: self.folder_path.clone(),
             account_path: self.account_path.clone(),
-            snippet: best_snippet(self, query),
+            snippet: best_snippet(self, query_lowercase),
             modified: self.modified.clone(),
         }
     }
@@ -870,37 +907,71 @@ fn normalized_optional_string(
     Ok(value.map(|text| normalize_line_separators(&text)))
 }
 
-fn indexed_note_matches(note: &IndexedNote, query: &str) -> bool {
-    query.is_empty()
-        || contains_case_insensitive(&note.title, query)
+fn indexed_note_matches(note: &IndexedNote, query_lowercase: &str) -> bool {
+    query_lowercase.is_empty()
+        || contains_case_insensitive(&note.title, query_lowercase)
         || note
             .snippet
             .as_deref()
-            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
         || note
             .body
             .as_deref()
-            .is_some_and(|body| contains_case_insensitive(body, query))
+            .is_some_and(|body| contains_case_insensitive(body, query_lowercase))
 }
 
-fn indexed_note_in_folder(note: &IndexedNote, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder)
-        || note.folder_path.as_deref() == Some(folder)
-        || note.account_path.as_deref() == Some(folder)
-}
-
-fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
-    note.folder.as_deref() == Some(folder)
-        || note.folder_path.as_deref() == Some(folder)
-        || note.account_path.as_deref() == Some(folder)
-}
-
-fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
-    if query.is_empty()
+fn indexed_note_matches_regex(note: &IndexedNote, re: &regex::Regex) -> bool {
+    re.is_match(&note.title)
         || note
             .snippet
             .as_deref()
-            .is_some_and(|snippet| contains_case_insensitive(snippet, query))
+            .is_some_and(|snippet| re.is_match(snippet))
+        || note.body.as_deref().is_some_and(|body| re.is_match(body))
+}
+
+fn note_hit_matches_regex(note: &NoteHit, re: &regex::Regex) -> bool {
+    re.is_match(&note.title)
+        || note
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| re.is_match(snippet))
+}
+
+fn indexed_note_in_folder(note: &IndexedNote, folder: &str) -> bool {
+    folder_matches(note.folder.as_deref(), folder)
+        || folder_matches(note.folder_path.as_deref(), folder)
+        || folder_matches(note.account_path.as_deref(), folder)
+}
+
+fn note_hit_in_folder(note: &NoteHit, folder: &str) -> bool {
+    folder_matches(note.folder.as_deref(), folder)
+        || folder_matches(note.folder_path.as_deref(), folder)
+        || folder_matches(note.account_path.as_deref(), folder)
+}
+
+fn folder_matches(note_folder: Option<&str>, filter: &str) -> bool {
+    note_folder.is_some_and(|path| path == filter || path.starts_with(&format!("{filter}/")))
+}
+
+/// Authoritative title/snippet match for the direct SQLite search path. This
+/// uses the same unicode-aware case folding as the warmed-cache path
+/// (`indexed_note_matches`) so both paths agree, regardless of whether SQLite's
+/// ASCII-only `LIKE` was used as a pre-filter.
+fn note_hit_matches_query(note: &NoteHit, query_lowercase: &str) -> bool {
+    query_lowercase.is_empty()
+        || contains_case_insensitive(&note.title, query_lowercase)
+        || note
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
+}
+
+fn best_snippet(note: &IndexedNote, query_lowercase: &str) -> Option<String> {
+    if query_lowercase.is_empty()
+        || note
+            .snippet
+            .as_deref()
+            .is_some_and(|snippet| contains_case_insensitive(snippet, query_lowercase))
     {
         return note.snippet.clone();
     }
@@ -909,7 +980,7 @@ fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
         .as_deref()
         .and_then(|body| {
             body.lines()
-                .find(|line| contains_case_insensitive(line, query))
+                .find(|line| contains_case_insensitive(line, query_lowercase))
         })
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -918,124 +989,11 @@ fn best_snippet(note: &IndexedNote, query: &str) -> Option<String> {
 }
 
 #[derive(Debug, Clone)]
-struct RawFolder {
-    id: i64,
-    name: String,
-    parent_id: Option<i64>,
-    account_id: Option<i64>,
-    account: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedTarget {
-    parent_id: Option<i64>,
-    account_id: Option<i64>,
-    name: String,
-    path: String,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedParent {
-    id: Option<i64>,
-    account_id: Option<i64>,
-    path: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 struct ResolvedNote {
     id: String,
     db_id: i64,
     title: String,
     folder_id: i64,
-}
-
-fn build_folder_entries(raw: &HashMap<i64, RawFolder>) -> Vec<FolderEntry> {
-    let mut memo = HashMap::new();
-    let mut entries = raw
-        .values()
-        .map(|folder| {
-            let path = folder_path(folder.id, raw, &mut memo, &mut HashSet::new());
-            let account_label = account_label(folder);
-            let account_path = format!("{account_label}/{path}");
-            FolderEntry {
-                id: folder.id,
-                name: folder.name.clone(),
-                parent_id: folder.parent_id,
-                account_id: folder.account_id,
-                account: folder.account.clone(),
-                path,
-                account_path,
-            }
-        })
-        .collect::<Vec<_>>();
-    entries.sort_by(|left, right| {
-        left.account_path
-            .to_lowercase()
-            .cmp(&right.account_path.to_lowercase())
-    });
-    entries
-}
-
-fn folder_path(
-    id: i64,
-    raw: &HashMap<i64, RawFolder>,
-    memo: &mut HashMap<i64, String>,
-    stack: &mut HashSet<i64>,
-) -> String {
-    if let Some(path) = memo.get(&id) {
-        return path.clone();
-    }
-
-    let Some(folder) = raw.get(&id) else {
-        return id.to_string();
-    };
-    if !stack.insert(id) {
-        return folder.name.clone();
-    }
-
-    let path = folder
-        .parent_id
-        .and_then(|parent_id| raw.get(&parent_id).map(|_| parent_id))
-        .map(|parent_id| {
-            format!(
-                "{}/{}",
-                folder_path(parent_id, raw, memo, stack),
-                folder.name
-            )
-        })
-        .unwrap_or_else(|| folder.name.clone());
-    stack.remove(&id);
-    memo.insert(id, path.clone());
-    path
-}
-
-fn account_label(folder: &RawFolder) -> String {
-    folder
-        .account
-        .clone()
-        .filter(|account| !account.trim().is_empty())
-        .or_else(|| folder.account_id.map(|id| format!("account:{id}")))
-        .unwrap_or_else(|| "unknown-account".to_owned())
-}
-
-fn normalize_path_arg(path: &str) -> Result<String, NgError> {
-    let path = path.trim().trim_matches('/');
-    let parts = path
-        .split('/')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err(NgError::Command("folder path cannot be empty".to_owned()));
-    }
-    Ok(parts.join("/"))
-}
-
-fn split_path_arg(path: &str) -> Result<Vec<String>, NgError> {
-    Ok(normalize_path_arg(path)?
-        .split('/')
-        .map(ToOwned::to_owned)
-        .collect())
 }
 
 fn parse_coredata_note_db_id(note_id: &str) -> Option<i64> {
@@ -1063,194 +1021,6 @@ fn parse_numeric_note_db_id(note_id: &str) -> Result<i64, NgError> {
     })
 }
 
-fn resolve_folder(folders: &[FolderEntry], path: &str) -> Result<FolderEntry, NgError> {
-    let path = normalize_path_arg(path)?;
-    let matches = folders
-        .iter()
-        .filter(|folder| folder.path == path || folder.account_path == path)
-        .cloned()
-        .collect::<Vec<_>>();
-
-    match matches.as_slice() {
-        [folder] => Ok(folder.clone()),
-        [] => Err(NgError::Command(format!("folder path not found: '{path}'"))),
-        _ => Err(NgError::Command(format!(
-            "folder path is ambiguous: '{path}'. Use an account-prefixed path such as '{}'.",
-            matches[0].account_path
-        ))),
-    }
-}
-
-fn resolve_target(
-    folders: &[FolderEntry],
-    source: &FolderEntry,
-    target_path: &str,
-) -> Result<ResolvedTarget, NgError> {
-    let parts = split_path_arg(target_path)?;
-    let Some(name) = parts.last().cloned() else {
-        return Err(NgError::Command(
-            "target folder path cannot be empty".to_owned(),
-        ));
-    };
-    if name.contains(':') && name.starts_with("account:") {
-        return Err(NgError::Command(
-            "target folder name cannot be an account placeholder".to_owned(),
-        ));
-    }
-
-    let parent_parts = &parts[..parts.len() - 1];
-    let parent = if parent_parts.is_empty() {
-        ResolvedParent {
-            id: source.parent_id,
-            account_id: source.account_id,
-            path: parent_path_for_source(folders, source),
-        }
-    } else {
-        resolve_target_parent(folders, source, parent_parts)?
-    };
-    let path = match parent.path {
-        Some(parent_path) => format!("{parent_path}/{name}"),
-        None => name.clone(),
-    };
-
-    Ok(ResolvedTarget {
-        parent_id: parent.id,
-        account_id: parent.account_id,
-        name,
-        path,
-    })
-}
-
-fn parent_path_for_source(folders: &[FolderEntry], source: &FolderEntry) -> Option<String> {
-    source
-        .parent_id
-        .and_then(|parent_id| {
-            folders
-                .iter()
-                .find(|folder| folder.id == parent_id)
-                .map(|folder| folder.account_path.clone())
-        })
-        .or_else(|| Some(folder_account_label(source)))
-}
-
-fn resolve_target_parent(
-    folders: &[FolderEntry],
-    source: &FolderEntry,
-    parent_parts: &[String],
-) -> Result<ResolvedParent, NgError> {
-    let parent_path = parent_parts.join("/");
-
-    if let Ok(parent) = resolve_folder(folders, &parent_path) {
-        return Ok(ResolvedParent {
-            id: Some(parent.id),
-            account_id: parent.account_id,
-            path: Some(parent.account_path),
-        });
-    }
-
-    let mut seen_accounts = HashSet::new();
-    let accounts = folders
-        .iter()
-        .filter_map(|folder| {
-            let key = (folder_account_label(folder), folder.account_id);
-            if seen_accounts.insert(key.clone()) {
-                Some(key)
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    let account_matches = accounts
-        .iter()
-        .filter(|(account, _)| account == &parent_path)
-        .collect::<Vec<_>>();
-
-    match account_matches.as_slice() {
-        [(_, account_id)] => Ok(ResolvedParent {
-            id: None,
-            account_id: *account_id,
-            path: Some(parent_path),
-        }),
-        [] if parent_path == "." => Ok(ResolvedParent {
-            id: source.parent_id,
-            account_id: source.account_id,
-            path: None,
-        }),
-        [] => Err(NgError::Command(format!(
-            "target parent folder path not found: '{parent_path}'"
-        ))),
-        _ => Err(NgError::Command(format!(
-            "target parent account is ambiguous: '{parent_path}'"
-        ))),
-    }
-}
-
-fn parent_chain_contains(
-    raw: &HashMap<i64, RawFolder>,
-    mut parent_id: Option<i64>,
-    needle: i64,
-) -> bool {
-    let mut seen = HashSet::new();
-    while let Some(id) = parent_id {
-        if id == needle {
-            return true;
-        }
-        if !seen.insert(id) {
-            return false;
-        }
-        parent_id = raw.get(&id).and_then(|folder| folder.parent_id);
-    }
-    false
-}
-
-fn descendant_folder_ids(raw: &HashMap<i64, RawFolder>, source_id: i64) -> Vec<i64> {
-    // Apple Notes shouldn't produce parent cycles, but iCloud merge artifacts
-    // and corrupt stores can. `seen` keeps a cycle from spinning this DFS into
-    // an unbounded loop and an unbounded `Vec` (which would later blow up
-    // `count_notes_in_folders`'s SQL parameter list). The traversal still
-    // visits each reachable descendant exactly once.
-    let mut out = Vec::new();
-    let mut seen = HashSet::new();
-    seen.insert(source_id);
-    let mut stack = vec![source_id];
-    while let Some(parent_id) = stack.pop() {
-        for folder in raw
-            .values()
-            .filter(|folder| folder.parent_id == Some(parent_id))
-        {
-            if seen.insert(folder.id) {
-                out.push(folder.id);
-                stack.push(folder.id);
-            }
-        }
-    }
-    out
-}
-
-fn sibling_exists(
-    folders: &[FolderEntry],
-    source_id: i64,
-    account_id: Option<i64>,
-    parent_id: Option<i64>,
-    name: &str,
-) -> bool {
-    folders.iter().any(|folder| {
-        folder.id != source_id
-            && folder.account_id == account_id
-            && folder.parent_id == parent_id
-            && folder.name.eq_ignore_ascii_case(name)
-    })
-}
-
-fn folder_account_label(folder: &FolderEntry) -> String {
-    folder
-        .account
-        .clone()
-        .filter(|account| !account.trim().is_empty())
-        .or_else(|| folder.account_id.map(|id| format!("account:{id}")))
-        .unwrap_or_else(|| "unknown-account".to_owned())
-}
-
 fn apple_reference_now() -> f64 {
     const APPLE_REFERENCE_UNIX_EPOCH: f64 = 978_307_200.0;
     SystemTime::now()
@@ -1259,8 +1029,20 @@ fn apple_reference_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-fn contains_case_insensitive(haystack: &str, needle: &str) -> bool {
-    haystack.to_lowercase().contains(&needle.to_lowercase())
+fn contains_case_insensitive(haystack: &str, needle_lowercase: &str) -> bool {
+    if needle_lowercase.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && needle_lowercase.is_ascii() {
+        if haystack.len() < needle_lowercase.len() {
+            return false;
+        }
+        return haystack
+            .as_bytes()
+            .windows(needle_lowercase.len())
+            .any(|window| window.eq_ignore_ascii_case(needle_lowercase.as_bytes()));
+    }
+    haystack.to_lowercase().contains(needle_lowercase)
 }
 
 fn like_contains_pattern(query: &str) -> String {
@@ -1360,16 +1142,87 @@ mod tests {
     #[test]
     fn search_matches_title_and_snippet() {
         let store = fixture_store();
-        let hits = store.search("refund", None, 10).unwrap();
+        let hits = store.search("refund", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
         assert_eq!(hits[0].folder.as_deref(), Some("Work"));
     }
 
     #[test]
+    fn search_matches_unicode_case_insensitively() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'Café résumé', 'naïve notes', 10, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        // Upper-cased non-ASCII query. SQLite `LIKE` would never match the
+        // lower-cased "café"/"naïve"; the direct SQLite path must still find it.
+        let hits = store.search("CAFÉ", None, None, 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "uppercase unicode query should match");
+        assert_eq!(hits[0].title, "Café résumé");
+
+        let hits = store.search("NAÏVE", None, None, 10, false).unwrap();
+        assert_eq!(
+            hits.len(),
+            1,
+            "uppercase unicode snippet query should match"
+        );
+        assert_eq!(hits[0].title, "Café résumé");
+
+        // ASCII matching is unchanged.
+        let hits = store.search("REFUND", None, None, 10, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Stripe refund");
+    }
+
+    #[test]
+    fn contains_case_insensitive_handles_expanding_lowercase() {
+        let needle = "İ".to_lowercase();
+        assert!(
+            contains_case_insensitive("İ", &needle),
+            "unicode lowercase expansion must not be rejected by byte length"
+        );
+    }
+
+    #[test]
+    fn search_matches_unicode_lowercase_expansion() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'İstanbul itinerary', 'Turkish dotted capital I', 10, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+
+        let hits = store.search("İSTANBUL", None, None, 10, false).unwrap();
+        assert_eq!(hits.len(), 1, "SQLite fallback should match");
+        assert_eq!(hits[0].title, "İstanbul itinerary");
+
+        let indexed = store.all_indexed_notes().unwrap();
+        let hits = search_indexed_notes(&indexed, "İSTANBUL", None, None, 10, false);
+        assert_eq!(hits.len(), 1, "warmed cache search should match");
+        assert_eq!(hits[0].title, "İstanbul itinerary");
+    }
+
+    #[test]
     fn search_filters_folder() {
         let store = fixture_store();
-        let hits = store.search("and", Some("Personal"), 10).unwrap();
+        let hits = store
+            .search("and", None, Some("Personal"), 10, false)
+            .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Garden list");
     }
@@ -1404,7 +1257,7 @@ mod tests {
     fn search_indexed_notes_matches_body_and_filters_folder() {
         let store = fixture_store();
         let notes = store.all_indexed_notes().unwrap();
-        let hits = search_indexed_notes(&notes, "body-only", Some("Work"), 10);
+        let hits = search_indexed_notes(&notes, "body-only", None, Some("Work"), 10, false);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].title, "Stripe refund");
         assert!(
@@ -1413,6 +1266,38 @@ mod tests {
                 .as_deref()
                 .unwrap_or_default()
                 .contains("body-only alpha phrase")
+        );
+    }
+
+    #[test]
+    fn search_indexed_notes_matches_unicode_body_case_insensitively() {
+        let store = fixture_store();
+        store
+            .conn
+            .execute(
+                r#"
+                INSERT INTO ZICCLOUDSYNCINGOBJECT
+                    (Z_PK, Z_ENT, Z_OPT, ZTITLE1, ZSNIPPET, ZFOLDER, ZNOTEDATA, ZMODIFICATIONDATE1, ZMARKEDFORDELETION)
+                VALUES (3, 12, 1, 'Body note', 'plain metadata', 10, 103, 750000000, 0)
+                "#,
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO ZICNOTEDATA (Z_PK, ZDATA) VALUES (?, ?)",
+                (103, fixture_body_blob("body-only café résumé phrase")),
+            )
+            .unwrap();
+
+        let notes = store.all_indexed_notes().unwrap();
+        let hits = search_indexed_notes(&notes, "CAFÉ", None, None, 10, false);
+        assert_eq!(hits.len(), 1, "uppercase unicode query should match body");
+        assert_eq!(hits[0].title, "Body note");
+        assert_eq!(
+            hits[0].snippet.as_deref(),
+            Some("body-only café résumé phrase")
         );
     }
 
@@ -1428,7 +1313,7 @@ mod tests {
             .execute("INSERT INTO Z_METADATA (Z_UUID) VALUES ('SECOND-UUID')", [])
             .unwrap();
 
-        let hits = store.search("refund", None, 10).unwrap();
+        let hits = store.search("refund", None, None, 10, false).unwrap();
         assert_eq!(hits.len(), 1, "search should not duplicate notes");
         assert_eq!(
             hits[0].id, "x-coredata://FIXTURE-UUID/ICNote/p1",
@@ -1527,40 +1412,28 @@ mod tests {
         assert_eq!(folder, 10);
     }
 
-    /// Regression: a parent cycle in the folder table (e.g. corrupt iCloud
-    /// merge state where folder A.parent == B and B.parent == A) used to make
-    /// `descendant_folder_ids` loop forever and grow an unbounded Vec, which
-    /// would then explode `count_notes_in_folders`'s IN-clause. Cycles must
-    /// terminate the traversal cleanly.
     #[test]
-    fn descendant_folder_ids_terminates_on_cyclic_parent_chain() {
-        let mut raw = HashMap::new();
-        raw.insert(
-            1,
-            RawFolder {
-                id: 1,
-                name: "A".into(),
-                parent_id: Some(2),
-                account_id: Some(99),
-                account: Some("iCloud".into()),
-            },
-        );
-        raw.insert(
-            2,
-            RawFolder {
-                id: 2,
-                name: "B".into(),
-                parent_id: Some(1),
-                account_id: Some(99),
-                account: Some("iCloud".into()),
-            },
-        );
+    fn search_regex_matches_alternation_in_title() {
+        let store = fixture_store();
+        let re = regex::RegexBuilder::new("str(ip|ipe) ref")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let hits = store.search("", Some(&re), None, 10, false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Stripe refund");
+    }
 
-        let descendants = descendant_folder_ids(&raw, 1);
-        assert_eq!(descendants, vec![2], "cycle must visit B exactly once");
-
-        let descendants = descendant_folder_ids(&raw, 2);
-        assert_eq!(descendants, vec![1], "cycle must visit A exactly once");
+    #[test]
+    fn search_indexed_notes_regex_matches_body() {
+        let store = fixture_store();
+        let notes = store.all_indexed_notes().unwrap();
+        let re = regex::RegexBuilder::new("body-only (alpha|beta)")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let hits = search_indexed_notes(&notes, "", Some(&re), None, 10, false);
+        assert_eq!(hits.len(), 2);
     }
 
     fn fixture_body_blob(text: &str) -> Vec<u8> {
